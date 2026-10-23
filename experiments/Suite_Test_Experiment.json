@@ -1,0 +1,30 @@
+{
+  "name": "Suite_Test_Experiment",
+  "shape": "RECTANGLE",
+  "center": {
+    "x": 200.0,
+    "y": -900.0,
+    "z": 30.0
+  },
+  "width": 250.0,
+  "height": 250.0,
+  "radius": 125.0,
+  "cleanup_vehicles_on_start": true,
+  "groups": [
+    {
+      "id": "g1",
+      "name": "Test Group 1",
+      "count": 40,
+      "origin": {
+        "x": 200.0,
+        "y": -980.0,
+        "z": 30.0
+      },
+      "destination": {
+        "x": 200.0,
+        "y": -820.0,
+        "z": 30.0
+      }
+    }
+  ]
+}

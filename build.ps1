@@ -56,7 +56,8 @@ $References = @(
     "System.dll",
     "System.Core.dll",
     "System.Drawing.dll",
-    "System.Windows.Forms.dll"
+    "System.Windows.Forms.dll",
+    "System.Web.Extensions.dll"
 )
 $RefArgs = $References | ForEach-Object { "/reference:$_" }
 

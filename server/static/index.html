@@ -1,0 +1,3217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>GTA V CrowdSim — Interactive Map & Simulation Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #090e17;
+      --sidebar-bg: #0f172a;
+      --card-bg: #152033;
+      --card-header: #1a273e;
+      --card-border: #1e293b;
+      --card-border-active: #38bdf8;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-purple: #8b5cf6;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg-dark);
+      color: var(--text-main);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      user-select: none;
+    }
+
+    /* MAIN CONTAINER: FLEX SPLIT */
+    .app-layout {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* LEFT: MAP WORKSPACE (~70%) */
+    .map-pane {
+      flex: 1 1 0;
+      position: relative;
+      height: 100%;
+      min-width: 0;
+      background: #090e17;
+      overflow: hidden;
+    }
+
+    #map-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      cursor: crosshair;
+    }
+
+    /* TOP SLIM TOOLBAR OVER MAP */
+    .map-toolbar {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+      gap: 10px;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(8px);
+      padding: 5px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      pointer-events: auto;
+    }
+
+    .tool-btn {
+      background: #1e293b;
+      color: #cbd5e1;
+      border: 1px solid #334155;
+      padding: 5px 9px;
+      border-radius: 5px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .tool-btn:hover {
+      background: #334155;
+      color: #fff;
+      border-color: #475569;
+    }
+    .tool-btn.active {
+      background: #0284c7;
+      color: #fff;
+      border-color: #38bdf8;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+    }
+    .tool-btn.btn-start {
+      background: #065f46;
+      border-color: #10b981;
+      color: #ecfdf5;
+    }
+    .tool-btn.btn-start:hover {
+      background: #059669;
+    }
+    .tool-btn.btn-pause {
+      background: #78350f;
+      border-color: #f59e0b;
+      color: #fffbeb;
+    }
+    .tool-btn.btn-stop {
+      background: #7f1d1d;
+      border-color: #ef4444;
+      color: #fef2f2;
+    }
+
+    /* BOTTOM MAP STATUS BAR */
+    .map-statusbar {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+
+    .status-pill-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(15, 23, 42, 0.9);
+      backdrop-filter: blur(8px);
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      pointer-events: auto;
+      color: #cbd5e1;
+    }
+
+    .badge-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 6px #10b981;
+    }
+    .badge-dot.offline {
+      background: #ef4444;
+      box-shadow: 0 0 6px #ef4444;
+    }
+
+    /* SPLITTER RESIZER */
+    .splitter {
+      width: 6px;
+      height: 100%;
+      background: #1e293b;
+      cursor: col-resize;
+      transition: background 0.15s;
+      flex-shrink: 0;
+      z-index: 45;
+    }
+    .splitter:hover, .splitter.dragging {
+      background: #38bdf8;
+    }
+
+    /* RIGHT DOCKED SIDEBAR (~30%) */
+    .sidebar-pane {
+      width: 440px;
+      min-width: 340px;
+      max-width: 680px;
+      height: 100vh;
+      max-height: 100vh;
+      background: var(--sidebar-bg);
+      border-left: 1px solid var(--card-border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      z-index: 40;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* 1. FIXED TOP HEADER (Height: 44px) */
+    .sidebar-header {
+      height: 44px;
+      min-height: 44px;
+      max-height: 44px;
+      padding: 8px 14px;
+      background: #111a28;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      box-sizing: border-box;
+    }
+    .sidebar-title {
+      font-size: 0.86rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* 2. FIXED STICKY ACTION TOOLBAR (Height: 44px) */
+    .sidebar-action-bar {
+      height: 44px;
+      min-height: 44px;
+      max-height: 44px;
+      padding: 6px 12px;
+      background: #141e30;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+      box-sizing: border-box;
+    }
+
+    /* QUICK JUMP SECTION NAV RIBBON (Height: 32px) */
+    .sidebar-nav-ribbon {
+      height: 32px;
+      min-height: 32px;
+      max-height: 32px;
+      background: #0d1524;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      gap: 4px;
+      flex-shrink: 0;
+      overflow-x: auto;
+      box-sizing: border-box;
+    }
+    .sidebar-nav-ribbon::-webkit-scrollbar { display: none; }
+    .nav-ribbon-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: #94a3b8;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .nav-ribbon-btn:hover {
+      background: #1e293b;
+      color: #38bdf8;
+      border-color: #334155;
+    }
+
+    .state-badge {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .state-badge.stopped { background: #334155; color: #94a3b8; }
+    .state-badge.running { background: #065f46; color: #34d399; }
+    .state-badge.paused { background: #78350f; color: #fbbf24; }
+
+    /* 3. VERTICALLY SCROLLABLE BODY */
+    .sidebar-body {
+      flex: 1 1 auto;
+      height: calc(100vh - 120px);
+      max-height: calc(100vh - 120px);
+      min-height: 0;
+      overflow-y: scroll !important;
+      overflow-x: hidden;
+      padding: 12px;
+      display: block; /* Block layout ensures child cards retain full natural height */
+      box-sizing: border-box;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .sidebar-body > .panel-card {
+      margin-bottom: 12px;
+    }
+    .sidebar-body > .panel-card:last-child {
+      margin-bottom: 36px;
+    }
+
+    /* CUSTOM SCROLLBAR FOR SIDEBAR BODY */
+    .sidebar-body::-webkit-scrollbar {
+      width: 6px;
+    }
+    .sidebar-body::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    .sidebar-body::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    .sidebar-body::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+
+    /* CARD PANELS */
+    .panel-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      overflow: hidden;
+      transition: border-color 0.15s ease;
+    }
+    .panel-card.active-selected-group {
+      border-color: var(--card-border-active);
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+    }
+
+    .panel-header {
+      padding: 9px 12px;
+      background: var(--card-header);
+      border-bottom: 1px solid var(--card-border);
+      font-size: 0.78rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+    .panel-header-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #e2e8f0;
+    }
+    .panel-body {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .panel-card.collapsed .panel-body {
+      display: none;
+    }
+
+    /* FORM STYLING */
+    .form-row {
+      display: flex;
+      gap: 8px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 1;
+    }
+    label {
+      font-size: 0.70rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .form-control {
+      background: #090e17;
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      color: #fff;
+      padding: 5px 8px;
+      font-size: 0.76rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .form-control:focus {
+      border-color: #38bdf8;
+    }
+    select.form-control {
+      cursor: pointer;
+    }
+
+    /* GROUP LIST ITEMS */
+    .group-list-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .group-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 10px;
+      background: #111a28;
+      border: 1px solid var(--card-border);
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .group-list-item:hover {
+      background: #172439;
+      border-color: #334155;
+    }
+    .group-list-item.selected {
+      background: #172a45;
+      border-color: #38bdf8;
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+    }
+    .group-info-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .group-color-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .group-name-text {
+      font-weight: 600;
+      font-size: 0.78rem;
+      color: #f8fafc;
+    }
+    .group-count-badge {
+      font-size: 0.68rem;
+      color: #94a3b8;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* PATHS DATABASE LIST */
+    .paths-db-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 240px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .path-db-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 8px 10px;
+      background: #0d1523;
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      font-size: 0.72rem;
+      transition: all 0.15s;
+    }
+    .path-db-item:hover {
+      border-color: #38bdf8;
+      background: #111c2e;
+    }
+    .path-db-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .path-db-title {
+      font-weight: 600;
+      color: #f8fafc;
+      font-size: 0.76rem;
+    }
+    .path-db-details {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #94a3b8;
+      font-size: 0.68rem;
+    }
+    .path-db-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    /* SAVED POINTS LIST */
+    .points-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .point-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 9px;
+      background: #0d1523;
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      font-size: 0.72rem;
+    }
+    .point-coords {
+      font-family: 'JetBrains Mono', monospace;
+      color: #94a3b8;
+      font-size: 0.68rem;
+    }
+    .point-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-xs {
+      background: #1e293b;
+      color: #cbd5e1;
+      border: 1px solid #334155;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 0.66rem;
+      cursor: pointer;
+    }
+    .btn-xs:hover {
+      background: #334155;
+      color: #fff;
+    }
+    .btn-xs-danger:hover {
+      background: #ef4444;
+      border-color: #ef4444;
+      color: #fff;
+    }
+
+    /* BUTTONS */
+    .btn {
+      background: #1e293b;
+      color: #cbd5e1;
+      border: 1px solid #334155;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: all 0.15s;
+    }
+    .btn:hover {
+      background: #334155;
+      color: #fff;
+    }
+    .btn-primary {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+    .btn-success {
+      background: #059669;
+      border-color: #10b981;
+      color: #fff;
+    }
+    .btn-success:hover {
+      background: #047857;
+    }
+    .btn-danger {
+      background: #b91c1c;
+      border-color: #ef4444;
+      color: #fff;
+    }
+    .btn-danger:hover {
+      background: #991b1b;
+    }
+    .btn-warning {
+      background: #b45309;
+      border-color: #f59e0b;
+      color: #fff;
+    }
+    .btn-warning:hover {
+      background: #92400e;
+    }
+
+    /* MAP POINT POPUP */
+    .point-popup {
+      position: absolute;
+      z-index: 50;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid #38bdf8;
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+      padding: 10px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      width: 230px;
+      backdrop-filter: blur(8px);
+    }
+    .point-popup.open { display: flex; }
+
+    /* MODAL (FOR CREATE GROUP / LOAD EXPERIMENT) */
+    .modal-backdrop {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-dialog {
+      background: #111a28;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      width: 480px;
+      max-width: 90vw;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.7);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 12px 16px;
+      background: #152033;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.86rem;
+      font-weight: 700;
+    }
+    .modal-body {
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 70vh;
+    }
+    .modal-footer {
+      padding: 10px 16px;
+      background: #152033;
+      border-top: 1px solid #1e293b;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    /* TELEMETRY METRIC GRID */
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+    .metric-card {
+      background: #090e17;
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-val {
+      font-size: 0.94rem;
+      font-weight: 700;
+      color: #38bdf8;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .metric-lbl {
+      font-size: 0.65rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+    }
+
+    /* NOTICE CALLOUTS */
+    .safety-notice {
+      background: rgba(56, 189, 248, 0.08);
+      border-left: 3px solid #38bdf8;
+      padding: 7px 10px;
+      font-size: 0.70rem;
+      color: #94a3b8;
+      border-radius: 0 4px 4px 0;
+      line-height: 1.4;
+    }
+    .safety-notice strong {
+      color: #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app-layout">
+
+    <!-- LEFT: MAP PANE (~70%) -->
+    <div class="map-pane" id="map-pane">
+      <canvas id="map-canvas"></canvas>
+
+      <!-- TOP MAP TOOLBAR -->
+      <div class="map-toolbar">
+        <div class="toolbar-group">
+          <button class="tool-btn" id="btn-follow">🧭 Follow: ON</button>
+          <button class="tool-btn" id="btn-recenter">🎯 Recenter</button>
+          <button class="tool-btn" id="btn-zoom-in">+</button>
+          <button class="tool-btn" id="btn-zoom-reset">1:1</button>
+          <button class="tool-btn" id="btn-zoom-out">-</button>
+        </div>
+
+        <div class="toolbar-group">
+          <button class="tool-btn active" id="mode-pan">✋ Pan</button>
+          <button class="tool-btn" id="mode-point">📍 Set Point</button>
+          <button class="tool-btn" id="mode-origin">🎯 Set Origin</button>
+          <button class="tool-btn" id="mode-dest">🏁 Set Dest</button>
+        </div>
+
+        <div class="toolbar-group">
+          <button class="tool-btn" id="btn-toggle-heatmap">🔥 Heatmap</button>
+          <button class="tool-btn active" id="btn-toggle-layer">🗺️ Real Map</button>
+          <button class="tool-btn" id="btn-toggle-sidebar">◫ Sidebar</button>
+        </div>
+      </div>
+
+      <!-- BOTTOM MAP STATUS BAR -->
+      <div class="map-statusbar">
+        <div class="status-pill-group">
+          <div class="badge-dot" id="dot-game"></div>
+          <span id="txt-game-status">GTA V: Connecting...</span>
+          <span style="color:#64748b;">|</span>
+          <span id="txt-player-coords">Player: ⚠️ Unavailable (Waiting for GTA V)</span>
+        </div>
+
+        <div class="status-pill-group">
+          <span id="txt-cursor-coords">Cursor: X: 0.0, Y: 0.0</span>
+          <span style="color:#64748b;">|</span>
+          <span id="txt-active-peds-count">Active Peds: 0</span>
+        </div>
+      </div>
+
+      <!-- MAP POINT CREATION POPUP -->
+      <div class="point-popup" id="point-popup">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <strong style="font-size:0.78rem;">Point at (<span id="popup-x">0</span>, <span id="popup-y">0</span>)</strong>
+          <button class="btn-xs" id="btn-close-point-popup">✕</button>
+        </div>
+        <input type="text" id="popup-point-name" class="form-control" placeholder="Point Name (e.g. Origin A)" value="Saved Point">
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-primary" id="btn-popup-save-point" style="flex:1;">Save</button>
+          <button class="btn btn-success" id="btn-popup-as-origin" style="flex:1;">As Origin</button>
+          <button class="btn btn-warning" id="btn-popup-as-dest" style="flex:1;">As Dest</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- DRAGGABLE SPLITTER -->
+    <div class="splitter" id="splitter"></div>
+
+    <!-- RIGHT DOCKED SIDEBAR (~30%) -->
+    <div class="sidebar-pane" id="sidebar-pane">
+
+      <!-- 1. FIXED HEADER -->
+      <div class="sidebar-header">
+        <div class="sidebar-title">
+          <span>👥 CrowdSim Stage 4 Control</span>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn" id="btn-save-exp" title="Save entire experiment configuration to JSON file" style="padding:2px 7px; font-size:0.72rem;">💾 Save</button>
+          <button class="btn" id="btn-load-exp" title="Load experiment JSON" style="padding:2px 7px; font-size:0.72rem;">📂 Load</button>
+        </div>
+      </div>
+
+      <!-- 2. FIXED STICKY ACTION TOOLBAR -->
+      <div class="sidebar-action-bar">
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span class="state-badge stopped" id="badge-exp-state">STOPPED</span>
+          <button class="tool-btn btn-start" id="btn-start-flow">▶ Start</button>
+          <button class="tool-btn btn-pause" id="btn-pause-flow">⏸ Pause</button>
+          <button class="tool-btn btn-stop" id="btn-stop-flow">⏹ Stop</button>
+          <button class="tool-btn" id="btn-reset-flow" title="Reset all groups and clear managed pedestrians">↺</button>
+        </div>
+        <div>
+          <button class="btn btn-warning" id="btn-clean-vehicles-quick" style="padding:3px 8px; font-size:0.70rem;" title="Despawn ambient vehicles within experiment boundary">🧹 Clear Vehicles</button>
+        </div>
+      </div>
+
+      <!-- QUICK-JUMP SECTION NAV RIBBON -->
+      <div class="sidebar-nav-ribbon">
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-group-manager')">👥 Groups</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-selected-group-editor')">⚙️ Config</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-saved-points')">📍 Points</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-vehicle-cleanup')">🚗 Vehicles</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-exp-boundary')">📐 Bounds</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-telemetry')">📊 Metrics</button>
+      </div>
+
+      <!-- 3. VERTICALLY SCROLLABLE CONTENT BODY -->
+      <div class="sidebar-body" id="sidebar-body">
+
+        <!-- CARD 1: GROUP MANAGER & SPAWNER -->
+        <div class="panel-card" id="card-group-manager">
+          <div class="panel-header" onclick="toggleCard('card-group-manager')">
+            <div class="panel-header-title">
+              <span>👥 Group Manager (<span id="lbl-group-total-count">0</span>)</span>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;" onclick="event.stopPropagation()">
+              <button class="btn btn-warning" id="btn-clear-all-peds" title="Despawn and delete all pedestrians across all groups" style="padding:2px 7px; font-size:0.70rem;">🧹 Clear All Peds</button>
+              <button class="btn btn-primary" id="btn-open-create-group-modal" style="padding:2px 7px; font-size:0.70rem;">+ Group</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="group-list-container" id="group-list-container">
+              <!-- Dynamically populated group items -->
+            </div>
+            <div style="font-size:0.70rem; color:#94a3b8;">
+              💡 <em>Click any group above or click its route line on the map to select and edit it.</em>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 2: SELECTED GROUP CONFIGURATION EDITOR -->
+        <div class="panel-card active-selected-group" id="card-selected-group-editor">
+          <div class="panel-header" onclick="toggleCard('card-selected-group-editor')">
+            <div class="panel-header-title">
+              <span>⚙️ Selected Group: <strong id="lbl-editing-group-name" style="color:#38bdf8;">Group A</strong></span>
+            </div>
+            <span class="badge-dot" id="dot-selected-group" style="background:#38bdf8; box-shadow:0 0 6px #38bdf8;"></span>
+          </div>
+          <div class="panel-body">
+
+            <!-- Name, Color, Enabled -->
+            <div class="form-row">
+              <div class="form-group" style="flex:2;">
+                <label>Group Name</label>
+                <input type="text" id="grp-name" class="form-control" value="Northbound Flow">
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Color</label>
+                <input type="color" id="grp-color" class="form-control" value="#38bdf8" style="height:28px; padding:0; cursor:pointer;">
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Enabled</label>
+                <label style="display:flex; align-items:center; height:28px; cursor:pointer;">
+                  <input type="checkbox" id="grp-enabled" checked style="width:16px; height:16px; accent-color:#38bdf8;">
+                </label>
+              </div>
+            </div>
+
+            <!-- Population & Spawn Rate -->
+            <div class="form-row">
+              <div class="form-group">
+                <label>Target Population</label>
+                <input type="number" id="grp-count" class="form-control" value="30" min="1" max="1000">
+              </div>
+              <div class="form-group">
+                <label>Spawn Rate (peds/s)</label>
+                <input type="number" id="grp-spawn-rate" class="form-control" value="2.5" step="0.5" min="0.5" max="20">
+              </div>
+            </div>
+
+            <!-- Model Preset & Density Aware -->
+            <div class="form-row">
+              <div class="form-group" style="flex:2;">
+                <label>Model Preset</label>
+                <select id="grp-preset" class="form-control">
+                  <option value="casual">Casual Pedestrians</option>
+                  <option value="business">Business / Downtown</option>
+                  <option value="tourist">Tourists / Beach</option>
+                  <option value="construction">Workers / Construction</option>
+                  <option value="security">Security / Officers</option>
+                  <option value="emergency">Emergency / Medics</option>
+                </select>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Density-Aware</label>
+                <label style="display:flex; align-items:center; height:28px; cursor:pointer; gap:4px; font-size:0.72rem;">
+                  <input type="checkbox" id="grp-density-aware" style="width:16px; height:16px; accent-color:#38bdf8;"> Throttle
+                </label>
+              </div>
+            </div>
+
+            <!-- Origin & Radius -->
+            <div class="form-row">
+              <div class="form-group" style="flex:2;">
+                <label>Spawn Origin Point</label>
+                <select id="grp-origin-select" class="form-control"></select>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Origin Rad (m)</label>
+                <input type="number" id="grp-origin-radius" class="form-control" value="10" min="2" max="100">
+              </div>
+              <div style="display:flex; align-items:flex-end;">
+                <button class="btn btn-xs" id="btn-pick-origin-map" title="Click on map to set this origin" style="height:28px;">📍 Pick</button>
+              </div>
+            </div>
+
+            <!-- Destination & Radius -->
+            <div class="form-row">
+              <div class="form-group" style="flex:2;">
+                <label>Destination Point</label>
+                <select id="grp-dest-select" class="form-control"></select>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Dest Rad (m)</label>
+                <input type="number" id="grp-dest-radius" class="form-control" value="15" min="2" max="100">
+              </div>
+              <div style="display:flex; align-items:flex-end;">
+                <button class="btn btn-xs" id="btn-pick-dest-map" title="Click on map to set this destination" style="height:28px;">🎯 Pick</button>
+              </div>
+            </div>
+
+            <!-- Speed & Behavior -->
+            <div class="form-row">
+              <div class="form-group">
+                <label>Movement Speed</label>
+                <select id="grp-speed" class="form-control">
+                  <option value="1.0">WALK (1.0x)</option>
+                  <option value="1.5">BRISK WALK (1.5x)</option>
+                  <option value="2.2">JOG / RUN (2.2x)</option>
+                  <option value="3.0">SPRINT (3.0x)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Movement Behavior</label>
+                <select id="grp-behavior" class="form-control">
+                  <option value="ROUTE_TRAVEL">Route Travel</option>
+                  <option value="INDEPENDENT_WANDER">Independent Wander</option>
+                  <option value="COHESIVE_WANDER">Cohesive Wander</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Arrival Behavior & Waypoints -->
+            <div class="form-row">
+              <div class="form-group">
+                <label>Arrival Behavior</label>
+                <select id="grp-arrival" class="form-control">
+                  <option value="NEXT_WAYPOINT">Loop Route (Two-Way Bidirectional)</option>
+                  <option value="DESPAWN_AT_DEST">Despawn at Destination (Continuous Stream)</option>
+                  <option value="WANDER">Wander Around Destination</option>
+                  <option value="GATHER">Stand Still / Gather</option>
+                  <option value="STOP">Stop</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Waypoints (<span id="lbl-wp-count">0</span>)</label>
+                <div style="display:flex; gap:4px;">
+                  <button class="btn btn-xs" id="btn-clear-wps" style="flex:1; height:28px;">Clear WPs</button>
+                  <button class="btn btn-xs btn-primary" id="btn-save-route-to-db" style="flex:1.2; height:28px;" title="Save current route to the Path Database">💾 Save to DB</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Group-Specific Vehicle Cleanup -->
+            <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:8px; display:flex; flex-direction:column; gap:6px;">
+              <div style="display:flex; align-items:center; justify-content:space-between;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#e2e8f0; text-transform:none; font-size:0.74rem;">
+                  <input type="checkbox" id="grp-veh-cleanup-enabled" style="accent-color:#38bdf8;"> Despawn Vehicles Near This Group
+                </label>
+                <button class="btn btn-xs btn-warning" id="btn-clean-group-veh-now">🧹 Clean Group Area</button>
+              </div>
+              <div class="form-row" id="row-grp-veh-settings" style="display:none;">
+                <div class="form-group" style="flex:1;">
+                  <label>Cleanup Center</label>
+                  <select id="grp-veh-center" class="form-control">
+                    <option value="ORIGIN">Group Origin</option>
+                    <option value="DESTINATION">Group Destination</option>
+                    <option value="EXPERIMENT">Experiment Center</option>
+                  </select>
+                </div>
+                <div class="form-group" style="flex:1;">
+                  <label>Radius (m)</label>
+                  <input type="number" id="grp-veh-radius" class="form-control" value="40" min="5" max="1000">
+                </div>
+              </div>
+            </div>
+
+            <!-- Group Live Status Bar -->
+            <div id="grp-live-status-bar" style="font-size:0.75rem; color:#94a3b8; padding:5px 8px; background:#0c121e; border:1px solid var(--card-border); border-radius:4px; margin-top:6px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
+              <span>Status: <b id="lbl-grp-status" style="color:#38bdf8;">READY</b></span>
+              <span>Alive: <b id="lbl-grp-alive" style="color:#f8fafc;">0</b> / <span id="lbl-grp-target">20</span></span>
+              <span>Pending: <b id="lbl-grp-pending">0</b></span>
+            </div>
+
+            <!-- Group Action Buttons -->
+            <div style="display:flex; gap:6px; margin-top:4px;">
+              <button class="btn btn-primary" id="btn-save-group-changes" style="flex:2;">💾 Save Changes</button>
+              <button class="btn btn-success" id="btn-resume-group" style="flex:1;" title="Spawn or restart group along path">▶ Spawn</button>
+              <button class="btn btn-warning" id="btn-pause-group" style="flex:1;" title="Pause group">⏸ Pause</button>
+            </div>
+            <div style="display:flex; gap:6px; margin-top:6px;">
+              <button class="btn btn-warning" id="btn-clear-group-peds" style="flex:1;" title="Despawn and delete all spawned people in this group">🧹 Delete People (0)</button>
+              <button class="btn btn-danger" id="btn-del-group" style="flex:1;" title="Delete this group and remove its pedestrians">🗑 Delete Group</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD: USER PATHS DATABASE -->
+        <div class="panel-card" id="card-paths-db">
+          <div class="panel-header" onclick="toggleCard('card-paths-db')">
+            <div class="panel-header-title">
+              <span>📁 Path Database (<span id="lbl-paths-count">0</span>)</span>
+            </div>
+            <button class="btn btn-xs btn-primary" id="btn-save-current-as-path" onclick="event.stopPropagation()" title="Save current route to Database">+ Save Path</button>
+          </div>
+          <div class="panel-body">
+            <div id="paths-db-list" class="paths-db-list">
+              <div style="font-size:0.70rem; color:#64748b; text-align:center; padding:10px;">Loading paths...</div>
+            </div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; text-align:center;">
+              User-created paths are permanently stored in the database.
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 3: SAVED MAP COORDINATES & POINTS -->
+        <div class="panel-card" id="card-saved-points">
+          <div class="panel-header" onclick="toggleCard('card-saved-points')">
+            <div class="panel-header-title">
+              <span>📍 Saved Map Coordinates (<span id="lbl-points-count">0</span>)</span>
+            </div>
+            <button class="btn btn-xs btn-primary" id="btn-add-point-manual" onclick="event.stopPropagation()">+ Add Point</button>
+          </div>
+          <div class="panel-body">
+            <div class="points-list" id="saved-points-list">
+              <!-- Dynamically populated points -->
+            </div>
+            <div style="font-size:0.70rem; color:#94a3b8;">
+              💡 <em>Click any point name to focus on map. Click 🎯 Origin or 🏁 Dest to assign directly to selected group.</em>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 4: AMBIENT VEHICLE CLEANUP CONTROL -->
+        <div class="panel-card" id="card-vehicle-cleanup">
+          <div class="panel-header" onclick="toggleCard('card-vehicle-cleanup')">
+            <div class="panel-header-title">
+              <span>🚗 Configurable Vehicle Cleanup</span>
+            </div>
+            <span style="font-size:0.68rem; color:#f59e0b;">Radius Controlled</span>
+          </div>
+          <div class="panel-body">
+            <div class="safety-notice">
+              <strong>Safety Protected:</strong> Excludes the player's current vehicle, vehicles carrying the player, and persistent/mission-critical vehicles. Cleans ambient vehicles strictly within the configured radius.
+            </div>
+
+            <div class="form-row">
+              <div class="form-group" style="flex:1;">
+                <label>Cleanup Center</label>
+                <select id="cleanup-center-type" class="form-control">
+                  <option value="SELECTED_GROUP">Selected Group Origin</option>
+                  <option value="PLAYER">Player Position</option>
+                  <option value="EXPERIMENT">Experiment Center</option>
+                </select>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Radius (m)</label>
+                <input type="number" id="cleanup-radius-val" class="form-control" value="40" min="10" max="300" step="5">
+              </div>
+            </div>
+
+            <button class="btn btn-warning" id="btn-execute-vehicle-cleanup" style="width:100%;">
+              🧹 Despawn Ambient Vehicles Within <span id="lbl-cleanup-radius-display">40</span>m
+            </button>
+            <div id="lbl-vehicle-cleanup-status" style="font-size:0.70rem; color:#10b981; text-align:center;"></div>
+          </div>
+        </div>
+
+        <!-- CARD 5: EXPERIMENT AREA & BOUNDARY (COLLAPSIBLE) -->
+        <div class="panel-card collapsed" id="card-exp-boundary">
+          <div class="panel-header" onclick="toggleCard('card-exp-boundary')">
+            <div class="panel-header-title">
+              <span>📐 Experiment Area & Boundaries</span>
+            </div>
+            <span style="font-size:0.68rem; color:#94a3b8;">Click to Expand</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Experiment Name</label>
+                <input type="text" id="exp-name" class="form-control" value="South Los Santos Simulation">
+              </div>
+              <div class="form-group">
+                <label>Boundary Shape</label>
+                <select id="exp-shape" class="form-control">
+                  <option value="RECTANGLE">Rectangle</option>
+                  <option value="CIRCLE">Circle</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Center X</label>
+                <input type="number" id="exp-cx" class="form-control" value="-14.4" step="10">
+              </div>
+              <div class="form-group">
+                <label>Center Y</label>
+                <input type="number" id="exp-cy" class="form-control" value="-1438.5" step="10">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Width / Diameter (m)</label>
+                <input type="number" id="exp-width" class="form-control" value="300" step="20">
+              </div>
+              <div class="form-group">
+                <label>Height (m)</label>
+                <input type="number" id="exp-height" class="form-control" value="300" step="20">
+              </div>
+            </div>
+            <button class="btn btn-primary" id="btn-update-boundary">Update Boundary</button>
+          </div>
+        </div>
+
+        <!-- CARD 6: LIVE TELEMETRY & DIAGNOSTICS (COLLAPSIBLE) -->
+        <div class="panel-card collapsed" id="card-telemetry">
+          <div class="panel-header" onclick="toggleCard('card-telemetry')">
+            <div class="panel-header-title">
+              <span>📊 Telemetry & Performance Metrics</span>
+            </div>
+            <span style="font-size:0.68rem; color:#94a3b8;">Click to Expand</span>
+          </div>
+          <div class="panel-body">
+            <div class="metric-grid">
+              <div class="metric-card">
+                <span class="metric-val" id="metric-fps">--</span>
+                <span class="metric-lbl">Game FPS</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-val" id="metric-peds">0</span>
+                <span class="metric-lbl">Alive Peds</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-val" id="metric-pending">0</span>
+                <span class="metric-lbl">Pending</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-val" id="metric-latency">0ms</span>
+                <span class="metric-lbl">Bridge Latency</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-val" id="metric-polls">0</span>
+                <span class="metric-lbl">Poll Count</span>
+              </div>
+              <div class="metric-card">
+                <span class="metric-val" id="metric-density">0.00</span>
+                <span class="metric-lbl">Max Density</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 1: CREATE NEW GROUP MODAL (COMPLETE UPFRONT CONFIG) -->
+  <div class="modal-backdrop" id="modal-create-group">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span>➕ Create New Pedestrian Group</span>
+        <button class="btn-xs" id="btn-close-create-group-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group" style="flex:2;">
+            <label>Group Name</label>
+            <input type="text" id="new-grp-name" class="form-control" value="Group B">
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label>Color</label>
+            <input type="color" id="new-grp-color" class="form-control" value="#10b981" style="height:28px; padding:0; cursor:pointer;">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Target Population</label>
+            <input type="number" id="new-grp-count" class="form-control" value="30" min="1" max="1000">
+          </div>
+          <div class="form-group">
+            <label>Spawn Rate (peds/sec)</label>
+            <input type="number" id="new-grp-spawn-rate" class="form-control" value="2.5" step="0.5" min="0.5" max="20">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Model Preset</label>
+            <select id="new-grp-preset" class="form-control">
+              <option value="casual">Casual Pedestrians</option>
+              <option value="business">Business / Downtown</option>
+              <option value="tourist">Tourists / Beach</option>
+              <option value="construction">Workers / Construction</option>
+              <option value="security">Security / Officers</option>
+              <option value="emergency">Emergency / Medics</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Movement Speed</label>
+            <select id="new-grp-speed" class="form-control">
+              <option value="1.0">WALK (1.0 m/s)</option>
+              <option value="1.3">BRISK (1.3 m/s)</option>
+              <option value="2.0">RUN (2.0 m/s)</option>
+              <option value="3.0">SPRINT (3.0 m/s)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group" style="flex:2;">
+            <label>Spawn Origin</label>
+            <select id="new-grp-origin" class="form-control"></select>
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label>Origin Rad (m)</label>
+            <input type="number" id="new-grp-origin-radius" class="form-control" value="10" min="2" max="100">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group" style="flex:2;">
+            <label>Destination</label>
+            <select id="new-grp-dest" class="form-control"></select>
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label>Dest Rad (m)</label>
+            <input type="number" id="new-grp-dest-radius" class="form-control" value="15" min="2" max="100">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Movement Behavior</label>
+            <select id="new-grp-behavior" class="form-control">
+              <option value="ROUTE_TRAVEL">Route Travel</option>
+              <option value="INDEPENDENT_WANDER">Independent Wander</option>
+              <option value="COHESIVE_WANDER">Cohesive Wander</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Arrival Behavior</label>
+            <select id="new-grp-arrival" class="form-control">
+              <option value="NEXT_WAYPOINT">Loop Route (Two-Way Bidirectional)</option>
+              <option value="DESPAWN_AT_DEST">Despawn at Destination (Continuous Stream)</option>
+              <option value="WANDER">Wander Around Destination</option>
+              <option value="GATHER">Stand Still / Gather</option>
+              <option value="STOP">Stop</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#e2e8f0; text-transform:none; font-size:0.76rem;">
+            <input type="checkbox" id="new-grp-veh-cleanup" style="accent-color:#38bdf8;"> Despawn Ambient Vehicles Near Origin (Disabled by default)
+          </label>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Vehicle Despawn Radius (m)</label>
+              <input type="number" id="new-grp-veh-radius" class="form-control" value="40" min="5" max="1000">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="btn-cancel-create-group">Cancel</button>
+        <button class="btn btn-primary" id="btn-confirm-create-group">Create Group</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: LOAD EXPERIMENT MODAL -->
+  <div class="modal-backdrop" id="modal-load-exp">
+    <div class="modal-dialog" style="width:400px;">
+      <div class="modal-header">
+        <span>📂 Load Experiment</span>
+        <button class="btn-xs" id="btn-close-load-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Select Saved Experiment File</label>
+        <div id="exp-file-list" style="display:flex; flex-direction:column; gap:6px; max-height:220px; overflow-y:auto;">
+          <div style="color:#94a3b8; font-size:0.74rem;">Loading experiment files...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* =========================================================================
+       1. STATE & CALIBRATION CONSTANTS
+       ========================================================================= */
+    const MAP_X_MIN = -5690.0, MAP_X_MAX = 6721.0;
+    const MAP_Y_MIN = -4041.0, MAP_Y_MAX = 8371.0;
+    const WORLD_W = MAP_X_MAX - MAP_X_MIN;
+    const WORLD_H = MAP_Y_MAX - MAP_Y_MIN;
+    const IMG_DIM = 8192;
+
+    const mapImage = new Image();
+    let mapLoaded = false;
+    mapImage.onload = () => {
+      mapLoaded = true;
+      drawMap();
+    };
+    mapImage.onerror = (err) => {
+      console.warn("Failed to load /static/gtav_map.jpg:", err);
+    };
+    mapImage.src = '/static/gtav_map.jpg';
+    if (mapImage.complete && mapImage.naturalWidth > 0) {
+      mapLoaded = true;
+    }
+
+    const state = {
+      zoom: 1.0,
+      panX: 0,
+      panY: 0,
+      followPlayer: true,
+      mode: 'pan', // 'pan', 'point', 'origin', 'dest', 'add-wp'
+      showHeatmap: false,
+      showRealMap: true,
+      selectedGroupId: 'grp_1',
+      pendingMapAction: null, // { action: 'set-origin' | 'set-dest', groupId: '...' }
+      player: { valid: false, x: null, y: null, z: null, heading: 0, handle: 0 },
+      experiment: {
+        name: 'South Los Santos Simulation',
+        state: 'STOPPED',
+        shape: 'RECTANGLE',
+        centerX: -14.4,
+        centerY: -1438.5,
+        width: 300,
+        height: 300,
+        radius: 150
+      },
+      savedPoints: [],
+      groups: [
+        {
+          id: 'grp_1',
+          name: 'Pedestrian Flow 1',
+          color: '#38bdf8',
+          enabled: true,
+          count: 20,
+          originPointId: null,
+          destinationPointId: null,
+          destinationRadius: 15.0,
+          originRadius: 10.0,
+          preset: 'casual',
+          speed: 1.0,
+          spawnRate: 2.5,
+          densityAware: false,
+          behavior: 'ROUTE_TRAVEL',
+          arrivalBehavior: 'WANDER',
+          vehicleCleanup: false,
+          vehicleCleanupRadius: 40.0,
+          vehicleCleanupCenter: 'ORIGIN',
+          waypoints: []
+        }
+      ],
+      pathsDB: [],
+      livePeds: [],
+      heatmapCells: []
+    };
+
+    /* =========================================================================
+       2. CANVAS RENDERING & MATHEMATICALLY VERIFIED COORDINATE CONVERSIONS
+       ========================================================================= */
+    const canvas = document.getElementById('map-canvas');
+    const ctx = canvas.getContext('2d');
+    const mapPane = document.getElementById('map-pane');
+
+    function worldToScreen(wx, wy) {
+      const u = (wx - MAP_X_MIN) / WORLD_W;
+      const v = (MAP_Y_MAX - wy) / WORLD_H;
+      const sx = canvas.width / 2 + (u * IMG_DIM - state.panX) * state.zoom;
+      const sy = canvas.height / 2 + (v * IMG_DIM - state.panY) * state.zoom;
+      return { x: sx, y: sy };
+    }
+
+    function screenToWorld(sx, sy) {
+      const imgX = (sx - canvas.width / 2) / state.zoom + state.panX;
+      const imgY = (sy - canvas.height / 2) / state.zoom + state.panY;
+      const u = imgX / IMG_DIM;
+      const v = imgY / IMG_DIM;
+      const wx = MAP_X_MIN + u * WORLD_W;
+      const wy = MAP_Y_MAX - v * WORLD_H;
+      return { x: wx, y: wy };
+    }
+
+    function resizeCanvas() {
+      const w = mapPane.clientWidth;
+      const h = mapPane.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        drawMap();
+      }
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    function drawMap() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (state.showRealMap && mapLoaded) {
+        const destW = IMG_DIM * state.zoom;
+        const destH = IMG_DIM * state.zoom;
+        const destX = canvas.width / 2 - state.panX * state.zoom;
+        const destY = canvas.height / 2 - state.panY * state.zoom;
+        ctx.drawImage(mapImage, destX, destY, destW, destH);
+      } else {
+        drawSchematicMap();
+      }
+
+      drawWorldGrid();
+      drawExperimentBoundary();
+      drawHeatmap();
+      drawGroupRoutes();
+      drawSavedPoints();
+      drawLivePedestrians();
+      drawPlayerMarker();
+    }
+
+    function drawSchematicMap() {
+      ctx.fillStyle = '#090e17';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const tl = worldToScreen(MAP_X_MIN, MAP_Y_MAX);
+      const br = worldToScreen(MAP_X_MAX, MAP_Y_MIN);
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    }
+
+    function drawWorldGrid() {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+      ctx.lineWidth = 1;
+      const step = 500;
+      for (let x = -5000; x <= 6000; x += step) {
+        const p1 = worldToScreen(x, -4000);
+        const p2 = worldToScreen(x, 8000);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+      for (let y = -4000; y <= 8000; y += step) {
+        const p1 = worldToScreen(-5000, y);
+        const p2 = worldToScreen(6000, y);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawExperimentBoundary() {
+      const exp = state.experiment;
+      const center = worldToScreen(exp.centerX, exp.centerY);
+
+      ctx.save();
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+
+      if (exp.shape === 'CIRCLE') {
+        const radPixels = (exp.radius / WORLD_W) * IMG_DIM * state.zoom;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radPixels, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.05)';
+        ctx.fill();
+      } else {
+        const halfWP = ((exp.width / 2) / WORLD_W) * IMG_DIM * state.zoom;
+        const halfHP = ((exp.height / 2) / WORLD_H) * IMG_DIM * state.zoom;
+        ctx.strokeRect(center.x - halfWP, center.y - halfHP, halfWP * 2, halfHP * 2);
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.05)';
+        ctx.fillRect(center.x - halfWP, center.y - halfHP, halfWP * 2, halfHP * 2);
+      }
+      ctx.restore();
+    }
+
+    function drawHeatmap() {
+      if (!state.showHeatmap || !state.heatmapCells || state.heatmapCells.length === 0) return;
+      ctx.save();
+      state.heatmapCells.forEach(cell => {
+        const pos = worldToScreen(cell.x, cell.y);
+        const radius = (8.0 / WORLD_W) * IMG_DIM * state.zoom;
+        const alpha = Math.min(0.7, cell.count * 0.15);
+        ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, Math.max(3, radius), 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    function drawGroupRoutes() {
+      state.groups.forEach(grp => {
+        if (!grp.enabled) return;
+        const origPt = state.savedPoints.find(p => p.id === grp.originPointId);
+        const destPt = state.savedPoints.find(p => p.id === grp.destinationPointId);
+        if (!origPt || !destPt) return;
+
+        const p1 = worldToScreen(origPt.x, origPt.y);
+        const p2 = worldToScreen(destPt.x, destPt.y);
+        const isSelected = grp.id === state.selectedGroupId;
+
+        ctx.save();
+        ctx.strokeStyle = grp.color;
+        ctx.lineWidth = isSelected ? 4 : 2;
+        if (isSelected) {
+          ctx.shadowColor = grp.color;
+          ctx.shadowBlur = 10;
+        }
+
+        // Route line
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        if (grp.waypoints && grp.waypoints.length > 0) {
+          grp.waypoints.forEach(wp => {
+            const swp = worldToScreen(wp.x, wp.y);
+            ctx.lineTo(swp.x, swp.y);
+          });
+        }
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+
+        // Chevrons along route
+        drawChevrons(p1, p2, grp.color);
+
+        // Destination radius circle
+        const destRadPixels = ((grp.destinationRadius || 15.0) / WORLD_W) * IMG_DIM * state.zoom;
+        ctx.beginPath();
+        ctx.arc(p2.x, p2.y, destRadPixels, 0, Math.PI * 2);
+        ctx.strokeStyle = grp.color;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.fillStyle = hexToRgba(grp.color, 0.12);
+        ctx.fill();
+
+        // Origin radius circle
+        const origRadPixels = ((grp.originRadius || 10.0) / WORLD_W) * IMG_DIM * state.zoom;
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, origRadPixels, 0, Math.PI * 2);
+        ctx.setLineDash([2, 4]);
+        ctx.stroke();
+
+        ctx.restore();
+      });
+    }
+
+    function drawChevrons(p1, p2, color) {
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 40) return;
+      const count = Math.floor(dist / 60);
+      const angle = Math.atan2(dy, dx);
+
+      ctx.save();
+      ctx.fillStyle = color;
+      for (let i = 1; i <= count; i++) {
+        const cx = p1.x + (dx * i) / (count + 1);
+        const cy = p1.y + (dy * i) / (count + 1);
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawSavedPoints() {
+      state.savedPoints.forEach(pt => {
+        const s = worldToScreen(pt.x, pt.y);
+        ctx.save();
+        ctx.fillStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.font = '10px Inter, sans-serif';
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(pt.name, s.x + 8, s.y + 3);
+        ctx.restore();
+      });
+    }
+
+    function drawLivePedestrians() {
+      if (!state.livePeds || state.livePeds.length === 0) return;
+      ctx.save();
+      state.livePeds.forEach(ped => {
+        const s = worldToScreen(ped.x, ped.y);
+        ctx.fillStyle = ped.color || '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    /* MATHEMATICALLY VERIFIED HEADING & PLAYER MARKER CONE */
+    function drawPlayerMarker() {
+      const p = state.player;
+      if (!p.valid || p.x === null || p.y === null) return;
+
+      const s = worldToScreen(p.x, p.y);
+      const rad = (p.heading * Math.PI) / 180.0;
+      // In GTA V: 0° is North (+Y, screen -Y), 90° is West (-X, screen -X), 180° is South (-Y, screen +Y), 270° is East (+X, screen +X)
+      const screenAngle = Math.atan2(-Math.cos(rad), -Math.sin(rad));
+
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.rotate(screenAngle);
+
+      // Directional Heading Cone
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, 36, -Math.PI / 6, Math.PI / 6);
+      ctx.closePath();
+      const grad = ctx.createRadialGradient(0, 0, 2, 0, 0, 36);
+      grad.addColorStop(0, 'rgba(56, 189, 248, 0.45)');
+      grad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Outer Glow Ring
+      ctx.beginPath();
+      ctx.arc(0, 0, 9, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.3)';
+      ctx.fill();
+
+      // Inner Core
+      ctx.beginPath();
+      ctx.arc(0, 0, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#0284c7';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Forward Pointer Tip
+      ctx.beginPath();
+      ctx.moveTo(0, -6);
+      ctx.lineTo(12, 0);
+      ctx.lineTo(0, 6);
+      ctx.closePath();
+      ctx.fillStyle = '#38bdf8';
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function hexToRgba(hex, alpha) {
+      const r = parseInt(hex.slice(1, 3), 16) || 56;
+      const g = parseInt(hex.slice(3, 5), 16) || 189;
+      const b = parseInt(hex.slice(5, 7), 16) || 248;
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    /* =========================================================================
+       3. MAP INTERACTIONS: PAN, ZOOM, MODES, CLICK ASSIGNMENTS
+       ========================================================================= */
+    let isDraggingMap = false;
+    let dragStartX = 0, dragStartY = 0;
+
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      if (state.mode === 'pan' || e.button === 1 || e.shiftKey) {
+        isDraggingMap = true;
+        dragStartX = mx;
+        dragStartY = my;
+        state.followPlayer = false;
+        updateFollowBtn();
+        return;
+      }
+
+      const world = screenToWorld(mx, my);
+
+      if (state.mode === 'point') {
+        openPointPopup(mx, my, world.x, world.y);
+      } else if (state.mode === 'origin') {
+        quickAssignOrigin(world.x, world.y);
+      } else if (state.mode === 'dest') {
+        quickAssignDest(world.x, world.y);
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      if (isDraggingMap) {
+        const dx = (mx - dragStartX) / state.zoom;
+        const dy = (my - dragStartY) / state.zoom;
+        state.panX -= dx;
+        state.panY -= dy;
+        dragStartX = mx;
+        dragStartY = my;
+        drawMap();
+      }
+
+      if (mx >= 0 && mx <= canvas.width && my >= 0 && my <= canvas.height) {
+        const world = screenToWorld(mx, my);
+        document.getElementById('txt-cursor-coords').textContent =
+          `Cursor: X: ${world.x.toFixed(1)}, Y: ${world.y.toFixed(1)}`;
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      isDraggingMap = false;
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+      const newZoom = Math.max(0.2, Math.min(12.0, state.zoom * zoomFactor));
+
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      const imgX = (mx - canvas.width / 2) / state.zoom + state.panX;
+      const imgY = (my - canvas.height / 2) / state.zoom + state.panY;
+
+      state.zoom = newZoom;
+      state.panX = imgX - (mx - canvas.width / 2) / state.zoom;
+      state.panY = imgY - (my - canvas.height / 2) / state.zoom;
+
+      state.followPlayer = false;
+      updateFollowBtn();
+      drawMap();
+    }, { passive: false });
+
+    // Mode Buttons
+    const modeBtns = {
+      'pan': document.getElementById('mode-pan'),
+      'point': document.getElementById('mode-point'),
+      'origin': document.getElementById('mode-origin'),
+      'dest': document.getElementById('mode-dest')
+    };
+
+    function setMode(newMode) {
+      state.mode = newMode;
+      Object.keys(modeBtns).forEach(m => {
+        if (m === newMode) modeBtns[m].classList.add('active');
+        else modeBtns[m].classList.remove('active');
+      });
+      closePointPopup();
+    }
+
+    Object.keys(modeBtns).forEach(m => {
+      modeBtns[m].addEventListener('click', () => setMode(m));
+    });
+
+    document.getElementById('btn-zoom-in').addEventListener('click', () => {
+      state.zoom = Math.min(12.0, state.zoom * 1.3);
+      drawMap();
+    });
+    document.getElementById('btn-zoom-out').addEventListener('click', () => {
+      state.zoom = Math.max(0.2, state.zoom / 1.3);
+      drawMap();
+    });
+    document.getElementById('btn-zoom-reset').addEventListener('click', () => {
+      state.zoom = 1.0;
+      drawMap();
+    });
+    document.getElementById('btn-recenter').addEventListener('click', () => {
+      if (state.player.valid && state.player.x !== null) {
+        const u = (state.player.x - MAP_X_MIN) / WORLD_W;
+        const v = (MAP_Y_MAX - state.player.y) / WORLD_H;
+        state.panX = u * IMG_DIM;
+        state.panY = v * IMG_DIM;
+      } else {
+        const u = (state.experiment.centerX - MAP_X_MIN) / WORLD_W;
+        const v = (MAP_Y_MAX - state.experiment.centerY) / WORLD_H;
+        state.panX = u * IMG_DIM;
+        state.panY = v * IMG_DIM;
+      }
+      state.followPlayer = true;
+      updateFollowBtn();
+      drawMap();
+    });
+
+    const btnFollow = document.getElementById('btn-follow');
+    btnFollow.addEventListener('click', () => {
+      state.followPlayer = !state.followPlayer;
+      updateFollowBtn();
+    });
+    function updateFollowBtn() {
+      btnFollow.textContent = state.followPlayer ? '🧭 Follow: ON' : '🧭 Follow: OFF';
+      if (state.followPlayer) btnFollow.classList.add('active');
+      else btnFollow.classList.remove('active');
+    }
+
+    document.getElementById('btn-toggle-heatmap').addEventListener('click', (e) => {
+      state.showHeatmap = !state.showHeatmap;
+      e.target.classList.toggle('active', state.showHeatmap);
+      drawMap();
+    });
+    document.getElementById('btn-toggle-layer').addEventListener('click', (e) => {
+      state.showRealMap = !state.showRealMap;
+      e.target.classList.toggle('active', state.showRealMap);
+      drawMap();
+    });
+
+    /* =========================================================================
+       4. POINT POPUP & QUICK ASSIGNMENT
+       ========================================================================= */
+    const pointPopup = document.getElementById('point-popup');
+    let currentPopupWorld = { x: 0, y: 0 };
+
+    function openPointPopup(screenX, screenY, worldX, worldY) {
+      currentPopupWorld = { x: worldX, y: worldY };
+      document.getElementById('popup-x').textContent = worldX.toFixed(1);
+      document.getElementById('popup-y').textContent = worldY.toFixed(1);
+      document.getElementById('popup-point-name').value = `Point ${state.savedPoints.length + 1}`;
+      pointPopup.style.left = `${Math.min(mapPane.clientWidth - 240, Math.max(10, screenX + 10))}px`;
+      pointPopup.style.top = `${Math.min(mapPane.clientHeight - 130, Math.max(10, screenY + 10))}px`;
+      pointPopup.classList.add('open');
+    }
+
+    function closePointPopup() {
+      pointPopup.classList.remove('open');
+    }
+    document.getElementById('btn-close-point-popup').addEventListener('click', closePointPopup);
+
+    function createPointFromPopup() {
+      const name = document.getElementById('popup-point-name').value.trim() || `Point ${state.savedPoints.length + 1}`;
+      const newPt = {
+        id: `pt_${Date.now()}`,
+        name: name,
+        x: Math.round(currentPopupWorld.x * 10) / 10,
+        y: Math.round(currentPopupWorld.y * 10) / 10
+      };
+      state.savedPoints.push(newPt);
+      populatePointDropdowns();
+      renderSavedPointsList();
+    fetchPathsDB();
+      closePointPopup();
+      drawMap();
+      return newPt;
+    }
+
+    document.getElementById('btn-popup-save-point').addEventListener('click', () => {
+      createPointFromPopup();
+      setMode('pan');
+    });
+
+    document.getElementById('btn-popup-as-origin').addEventListener('click', () => {
+      const pt = createPointFromPopup();
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.originPointId = pt.id;
+        syncActiveGroupUI();
+        drawMap();
+      }
+      setMode('pan');
+    });
+
+    document.getElementById('btn-popup-as-dest').addEventListener('click', () => {
+      const pt = createPointFromPopup();
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.destinationPointId = pt.id;
+        syncActiveGroupUI();
+        drawMap();
+      }
+      setMode('pan');
+    });
+
+    function quickAssignOrigin(wx, wy) {
+      const pt = {
+        id: `pt_${Date.now()}`,
+        name: `Origin (${wx.toFixed(0)}, ${wy.toFixed(0)})`,
+        x: Math.round(wx * 10) / 10,
+        y: Math.round(wy * 10) / 10
+      };
+      state.savedPoints.push(pt);
+      populatePointDropdowns();
+      renderSavedPointsList();
+
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.originPointId = pt.id;
+        syncActiveGroupUI();
+      }
+      drawMap();
+      setMode('pan');
+    }
+
+    function quickAssignDest(wx, wy) {
+      const pt = {
+        id: `pt_${Date.now()}`,
+        name: `Dest (${wx.toFixed(0)}, ${wy.toFixed(0)})`,
+        x: Math.round(wx * 10) / 10,
+        y: Math.round(wy * 10) / 10
+      };
+      state.savedPoints.push(pt);
+      populatePointDropdowns();
+      renderSavedPointsList();
+
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.destinationPointId = pt.id;
+        syncActiveGroupUI();
+      }
+      drawMap();
+      setMode('pan');
+    }
+
+    document.getElementById('btn-pick-origin-map').addEventListener('click', () => setMode('origin'));
+    document.getElementById('btn-pick-dest-map').addEventListener('click', () => setMode('dest'));
+
+    /* =========================================================================
+       5. GROUP MANAGER & SELECTED GROUP CONFIGURATION
+       ========================================================================= */
+    const groupListContainer = document.getElementById('group-list-container');
+    const lblEditingGroupName = document.getElementById('lbl-editing-group-name');
+    const dotSelectedGroup = document.getElementById('dot-selected-group');
+
+    const grpNameInput = document.getElementById('grp-name');
+    const grpColorPicker = document.getElementById('grp-color');
+    const grpEnabledChk = document.getElementById('grp-enabled');
+    const grpCountInput = document.getElementById('grp-count');
+    const grpSpawnRateInput = document.getElementById('grp-spawn-rate');
+    const grpPresetSelect = document.getElementById('grp-preset');
+    const grpDensityAwareChk = document.getElementById('grp-density-aware');
+    const grpOriginSelect = document.getElementById('grp-origin-select');
+    const grpOriginRadiusInput = document.getElementById('grp-origin-radius');
+    const grpDestSelect = document.getElementById('grp-dest-select');
+    const grpDestRadiusInput = document.getElementById('grp-dest-radius');
+    const grpSpeedSelect = document.getElementById('grp-speed');
+    const grpBehaviorSelect = document.getElementById('grp-behavior');
+    const grpArrivalSelect = document.getElementById('grp-arrival');
+    const grpVehCleanupChk = document.getElementById('grp-veh-cleanup-enabled');
+    const rowGrpVehSettings = document.getElementById('row-grp-veh-settings');
+    const grpVehCenterSelect = document.getElementById('grp-veh-center');
+    const grpVehRadiusInput = document.getElementById('grp-veh-radius');
+
+    grpVehCleanupChk.addEventListener('change', () => {
+      rowGrpVehSettings.style.display = grpVehCleanupChk.checked ? 'flex' : 'none';
+    });
+
+    function renderGroupList() {
+      groupListContainer.innerHTML = '';
+      document.getElementById('lbl-group-total-count').textContent = state.groups.length;
+
+      state.groups.forEach(grp => {
+        const item = document.createElement('div');
+        item.className = `group-list-item ${grp.id === state.selectedGroupId ? 'selected' : ''}`;
+        item.onclick = () => selectGroup(grp.id);
+
+        const isRunning = state.experiment.state === 'RUNNING';
+        const statusBadge = grp.status || (isRunning ? 'ACTIVE' : 'READY');
+
+        item.innerHTML = `
+          <div class="group-info-left" style="overflow:hidden;">
+            <div class="group-color-dot" style="background:${grp.color}; flex-shrink:0;"></div>
+            <div style="min-width:0; overflow:hidden;">
+              <div class="group-name-text" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${grp.name}</div>
+              <div class="group-count-badge">${grp.aliveCount || 0} / ${grp.count} peds • ${statusBadge}</div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:5px; flex-shrink:0;" onclick="event.stopPropagation()">
+            <input type="checkbox" ${grp.enabled ? 'checked' : ''} title="Toggle active in simulation" style="accent-color:#38bdf8; cursor:pointer;" onclick="toggleGroupEnabled('${grp.id}', this.checked)">
+            <button class="btn btn-warning btn-xs" title="Delete all spawned people in '${grp.name}'" onclick="deleteGroupPeople('${grp.id}')" style="padding:2px 6px; font-size:0.68rem; line-height:1.2;">🧹 Peds</button>
+            <button class="btn btn-danger btn-xs" title="Delete group '${grp.name}' and its people" onclick="deleteGroup('${grp.id}')" style="padding:2px 6px; font-size:0.68rem; line-height:1.2;">🗑</button>
+          </div>
+        `;
+        groupListContainer.appendChild(item);
+      });
+    }
+
+    function selectGroup(groupId) {
+      state.selectedGroupId = groupId;
+      renderGroupList();
+      syncActiveGroupUI();
+      drawMap();
+    }
+
+    function toggleGroupEnabled(groupId, enabled) {
+      const grp = state.groups.find(g => g.id === groupId);
+      if (grp) {
+        grp.enabled = enabled;
+        drawMap();
+      }
+    }
+
+    function populatePointDropdowns() {
+      let html = '<option value="">-- None --</option>';
+      state.savedPoints.forEach(p => {
+        html += `<option value="${p.id}">${p.name} (${p.x}, ${p.y})</option>`;
+      });
+      grpOriginSelect.innerHTML = html;
+      grpDestSelect.innerHTML = html;
+      document.getElementById('new-grp-origin').innerHTML = html;
+      document.getElementById('new-grp-dest').innerHTML = html;
+
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grpOriginSelect.value = grp.originPointId || '';
+        grpDestSelect.value = grp.destinationPointId || '';
+      }
+    }
+
+    function syncActiveGroupUI() {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+
+      lblEditingGroupName.textContent = grp.name;
+      dotSelectedGroup.style.background = grp.color;
+      dotSelectedGroup.style.boxShadow = `0 0 6px ${grp.color}`;
+
+      grpNameInput.value = grp.name;
+      grpColorPicker.value = grp.color;
+      grpEnabledChk.checked = grp.enabled;
+      grpCountInput.value = grp.count;
+      grpSpawnRateInput.value = grp.spawnRate;
+      grpPresetSelect.value = grp.preset;
+      grpDensityAwareChk.checked = grp.densityAware || false;
+      grpOriginSelect.value = grp.originPointId || '';
+      grpOriginRadiusInput.value = grp.originRadius || 10.0;
+      grpDestSelect.value = grp.destinationPointId || '';
+      grpDestRadiusInput.value = grp.destinationRadius || 15.0;
+      grpSpeedSelect.value = String(grp.speed);
+      grpBehaviorSelect.value = grp.behavior;
+      grpArrivalSelect.value = grp.arrivalBehavior;
+
+      grpVehCleanupChk.checked = grp.vehicleCleanup || false;
+      updateGroupActionButtons();
+      rowGrpVehSettings.style.display = grp.vehicleCleanup ? 'flex' : 'none';
+      grpVehCenterSelect.value = grp.vehicleCleanupCenter || 'ORIGIN';
+      grpVehRadiusInput.value = grp.vehicleCleanupRadius || 40.0;
+
+      document.getElementById('lbl-wp-count').textContent = grp.waypoints ? grp.waypoints.length : 0;
+    }
+
+    function saveGroupFormInputs(grp) {
+      if (!grp) return;
+      grp.name = grpNameInput.value.trim() || grp.name;
+      grp.color = grpColorPicker.value;
+      grp.enabled = grpEnabledChk.checked;
+      grp.count = parseInt(grpCountInput.value) || 20;
+      grp.spawnRate = parseFloat(grpSpawnRateInput.value) || 2.5;
+      grp.preset = grpPresetSelect.value;
+      grp.densityAware = grpDensityAwareChk.checked;
+      grp.originPointId = grpOriginSelect.value;
+      grp.originRadius = parseFloat(grpOriginRadiusInput.value) || 10.0;
+      grp.destinationPointId = grpDestSelect.value;
+      grp.destinationRadius = parseFloat(grpDestRadiusInput.value) || 15.0;
+      grp.speed = parseFloat(grpSpeedSelect.value) || 1.0;
+      grp.behavior = grpBehaviorSelect.value;
+      grp.arrivalBehavior = grpArrivalSelect.value;
+      grp.vehicleCleanup = grpVehCleanupChk.checked;
+      grp.vehicleCleanupCenter = grpVehCenterSelect.value;
+      grp.vehicleCleanupRadius = parseFloat(grpVehRadiusInput.value) || 40.0;
+    }
+
+    function groupPayload(grp, extra = {}) {
+      const origPt = state.savedPoints.find(p => p.id === grp.originPointId);
+      const destPt = state.savedPoints.find(p => p.id === grp.destinationPointId);
+      const hasRoute = !!destPt || (grp.waypoints && grp.waypoints.length > 0);
+      return Object.assign({
+        group_id: grp.id,
+        id: grp.id,
+        name: grp.name,
+        color: grp.color,
+        count: grp.count,
+        spawn_rate: grp.spawnRate,
+        origin: origPt ? { x: origPt.x, y: origPt.y } : null,
+        origin_radius: grp.originRadius,
+        destination: destPt ? { x: destPt.x, y: destPt.y } : null,
+        destination_radius: grp.destinationRadius,
+        waypoints: (grp.waypoints || []).map(w => ({ x: w.x, y: w.y })),
+        speed: grp.speed,
+        move_speed: grp.speed,
+        behavior: hasRoute ? (grp.behavior || 'ROUTE_TRAVEL') : grp.behavior,
+        arrival_behavior: grp.arrivalBehavior,
+        preset: grp.preset,
+        density_aware: grp.densityAware,
+        vehicle_cleanup: grp.vehicleCleanup,
+        vehicle_cleanup_radius: grp.vehicleCleanupRadius,
+        vehicle_cleanup_center: grp.vehicleCleanupCenter,
+        spawn: false,
+        restart: false
+      }, extra);
+    }
+
+    function syncGroup(grp, extra = {}, callback) {
+      const payload = groupPayload(grp, extra);
+      sendCommand('CREATE_GROUP', payload, callback);
+    }
+
+    function updateGroupActionButtons() {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      const resumeBtn = document.getElementById('btn-resume-group');
+      const lblStatus = document.getElementById('lbl-grp-status');
+      const lblAlive = document.getElementById('lbl-grp-alive');
+      const lblTarget = document.getElementById('lbl-grp-target');
+      const lblPending = document.getElementById('lbl-grp-pending');
+
+      if (!grp) return;
+
+      const alive = grp.aliveCount || 0;
+      const target = grp.count || 20;
+      const pending = grp.pendingCount || 0;
+      const st = grp.status || (state.experiment.state === 'RUNNING' ? 'ACTIVE' : 'READY');
+
+      if (lblStatus) {
+        lblStatus.textContent = st;
+        lblStatus.style.color = (st === 'SPAWNING' || st === 'ACTIVE') ? '#10b981' : (st === 'PAUSED' ? '#f59e0b' : '#38bdf8');
+      }
+      if (lblAlive) lblAlive.textContent = alive;
+      if (lblTarget) lblTarget.textContent = target;
+      if (lblPending) lblPending.textContent = pending;
+
+      if (resumeBtn) {
+        if (st === 'PAUSED') {
+          resumeBtn.textContent = '▶ Resume';
+          resumeBtn.title = 'Resume paused group';
+        } else if (alive > 0) {
+          resumeBtn.textContent = '↻ Respawn';
+          resumeBtn.title = 'Respawn group along configured path / origin';
+        } else {
+          resumeBtn.textContent = '▶ Spawn';
+          resumeBtn.title = 'Start spawning group';
+        }
+      }
+
+      const clearPedsBtn = document.getElementById('btn-clear-group-peds');
+      if (clearPedsBtn) {
+        clearPedsBtn.textContent = `🧹 Delete People (${alive})`;
+        clearPedsBtn.title = alive > 0 
+          ? `Despawn and delete ${alive} active pedestrians in this group` 
+          : 'No pedestrians currently spawned for this group';
+      }
+
+      const startFlowBtn = document.getElementById('btn-start-flow');
+      if (startFlowBtn) {
+        startFlowBtn.textContent = (state.experiment.state === 'PAUSED') ? '▶ Resume' : '▶ Start';
+      }
+    }
+
+    // Save changes to selected group (LOCAL & BACKEND CREATE_GROUP upsert)
+    document.getElementById('btn-save-group-changes').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+
+      saveGroupFormInputs(grp);
+      renderGroupList();
+      drawMap();
+
+      syncGroup(grp, { spawn: false, restart: false }, (data) => {
+        showToast(`Saved changes to "${grp.name}"`);
+        updateGroupActionButtons();
+      });
+    });
+
+    // Start / Resume / Respawn for Selected Group (CONNECTED TO EXPERIMENT)
+    document.getElementById('btn-resume-group').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+
+      saveGroupFormInputs(grp);
+      const isPaused = grp.status === 'PAUSED';
+      const hasAlive = (grp.aliveCount || 0) > 0;
+
+      if (isPaused) {
+        sendCommand('START_GROUP', { group_id: grp.id, restart: false }, () => {
+          grp.status = 'ACTIVE';
+          state.experiment.state = 'RUNNING';
+          updateExperimentStateBadge();
+          updateGroupActionButtons();
+          renderGroupList();
+          showToast(`Resumed group "${grp.name}"`);
+        });
+      } else if (hasAlive) {
+        // Respawn fresh along path
+        syncGroup(grp, { spawn: true, restart: true }, () => {
+          grp.status = 'SPAWNING';
+          state.experiment.state = 'RUNNING';
+          updateExperimentStateBadge();
+          updateGroupActionButtons();
+          renderGroupList();
+          showToast(`Respawning "${grp.name}" along route...`);
+        });
+      } else {
+        // First spawn
+        syncGroup(grp, { spawn: true, restart: false }, () => {
+          grp.status = 'SPAWNING';
+          state.experiment.state = 'RUNNING';
+          updateExperimentStateBadge();
+          updateGroupActionButtons();
+          renderGroupList();
+          showToast(`Spawning "${grp.name}"...`);
+        });
+      }
+    });
+
+    // Pause Spawning for Selected Group
+    document.getElementById('btn-pause-group').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+      sendCommand('PAUSE_GROUP', { group_id: grp.id }, () => {
+        grp.status = 'PAUSED';
+        updateGroupActionButtons();
+        renderGroupList();
+        showToast(`Paused group "${grp.name}"`);
+      });
+    });
+
+    // Delete all people (pedestrians) in a specific group
+    function deleteGroupPeople(groupId) {
+      const grp = state.groups.find(g => g.id === groupId);
+      if (!grp) return;
+      if (!confirm(`Delete all spawned people for group "${grp.name}"?`)) return;
+
+      sendCommand('CLEAR_PEDS', { group_id: groupId }, () => {
+        grp.aliveCount = 0;
+        grp.pendingCount = 0;
+        grp.status = 'CONFIGURED';
+        state.livePeds = state.livePeds.filter(p => p.group_id !== groupId);
+        renderGroupList();
+        updateGroupActionButtons();
+        drawMap();
+        showToast(`Deleted all people in group "${grp.name}"`);
+      });
+    }
+
+    // Delete group and despawn all its pedestrians
+    function deleteGroup(groupId) {
+      const grp = state.groups.find(g => g.id === groupId);
+      const name = grp ? grp.name : groupId;
+      if (!confirm(`Delete group "${name}" and remove all its pedestrians?`)) return;
+
+      sendCommand('REMOVE_GROUP', { group_id: groupId }, () => {
+        state.groups = state.groups.filter(g => g.id !== groupId);
+        state.livePeds = state.livePeds.filter(p => p.group_id !== groupId);
+
+        if (state.groups.length === 0) {
+          const newGrp = {
+            id: `grp_${Date.now()}`,
+            name: 'Pedestrian Flow 1',
+            color: '#38bdf8',
+            enabled: true,
+            count: 20,
+            originPointId: null,
+            destinationPointId: null,
+            destinationRadius: 15.0,
+            originRadius: 10.0,
+            preset: 'casual',
+            speed: 1.0,
+            spawnRate: 2.5,
+            densityAware: false,
+            behavior: 'ROUTE_TRAVEL',
+            arrivalBehavior: 'WANDER',
+            vehicleCleanup: false,
+            vehicleCleanupRadius: 40.0,
+            vehicleCleanupCenter: 'ORIGIN',
+            waypoints: [],
+            status: 'READY',
+            aliveCount: 0
+          };
+          state.groups.push(newGrp);
+          state.selectedGroupId = newGrp.id;
+        } else if (state.selectedGroupId === groupId) {
+          state.selectedGroupId = state.groups[0].id;
+        }
+
+        renderGroupList();
+        syncActiveGroupUI();
+        drawMap();
+        showToast(`Group "${name}" deleted`);
+      });
+    }
+
+    document.getElementById('btn-clear-group-peds').addEventListener('click', () => {
+      deleteGroupPeople(state.selectedGroupId);
+    });
+
+    document.getElementById('btn-del-group').addEventListener('click', () => {
+      deleteGroup(state.selectedGroupId);
+    });
+
+    document.getElementById('btn-clear-all-peds').addEventListener('click', () => {
+      if (!confirm('Despawn and delete ALL pedestrians in the simulation?')) return;
+      sendCommand('CLEAR_PEDS', {}, () => {
+        state.groups.forEach(g => {
+          g.aliveCount = 0;
+          g.pendingCount = 0;
+          if (g.status === 'ACTIVE' || g.status === 'SPAWNING') g.status = 'CONFIGURED';
+        });
+        state.livePeds = [];
+        renderGroupList();
+        updateGroupActionButtons();
+        drawMap();
+        showToast('All pedestrians cleared');
+      });
+    });
+
+    document.getElementById('btn-clear-wps').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.waypoints = [];
+        document.getElementById('lbl-wp-count').textContent = 0;
+        drawMap();
+      }
+    });
+
+    /* =========================================================================
+       6. CREATE NEW GROUP MODAL WORKFLOW (+ Group)
+       ========================================================================= */
+    const modalCreateGroup = document.getElementById('modal-create-group');
+    const colors = ['#38bdf8', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#e11d48'];
+
+    document.getElementById('btn-open-create-group-modal').addEventListener('click', () => {
+      populatePointDropdowns();
+      const nextLetter = String.fromCharCode(65 + state.groups.length);
+      document.getElementById('new-grp-name').value = `Group ${nextLetter}`;
+      document.getElementById('new-grp-color').value = colors[state.groups.length % colors.length];
+      document.getElementById('new-grp-count').value = 30;
+      document.getElementById('new-grp-spawn-rate').value = 2.5;
+      document.getElementById('new-grp-origin').value = state.savedPoints[0] ? state.savedPoints[0].id : '';
+      document.getElementById('new-grp-dest').value = state.savedPoints[1] ? state.savedPoints[1].id : '';
+      document.getElementById('new-grp-veh-cleanup').checked = false;
+      modalCreateGroup.classList.add('open');
+    });
+
+    document.getElementById('btn-close-create-group-modal').addEventListener('click', () => {
+      modalCreateGroup.classList.remove('open');
+    });
+    document.getElementById('btn-cancel-create-group').addEventListener('click', () => {
+      modalCreateGroup.classList.remove('open');
+    });
+
+    document.getElementById('btn-confirm-create-group').addEventListener('click', () => {
+      const newId = `grp_${Date.now()}`;
+      const name = document.getElementById('new-grp-name').value.trim() || `Group ${newId}`;
+      const color = document.getElementById('new-grp-color').value;
+      const count = parseInt(document.getElementById('new-grp-count').value) || 30;
+      const spawnRate = parseFloat(document.getElementById('new-grp-spawn-rate').value) || 2.5;
+      const preset = document.getElementById('new-grp-preset').value;
+      const speed = parseFloat(document.getElementById('new-grp-speed').value) || 1.0;
+      const origId = document.getElementById('new-grp-origin').value;
+      const origRad = parseFloat(document.getElementById('new-grp-origin-radius').value) || 10.0;
+      const destId = document.getElementById('new-grp-dest').value;
+      const destRad = parseFloat(document.getElementById('new-grp-dest-radius').value) || 15.0;
+      const behavior = document.getElementById('new-grp-behavior').value;
+      const arrival = document.getElementById('new-grp-arrival').value;
+      const vehClean = document.getElementById('new-grp-veh-cleanup').checked;
+      const vehRadius = parseFloat(document.getElementById('new-grp-veh-radius').value) || 40.0;
+
+      const newGrp = {
+        id: newId,
+        name: name,
+        color: color,
+        enabled: true,
+        count: count,
+        originPointId: origId,
+        originRadius: origRad,
+        destinationPointId: destId,
+        destinationRadius: destRad,
+        preset: preset,
+        speed: speed,
+        spawnRate: spawnRate,
+        behavior: behavior,
+        arrivalBehavior: arrival,
+        vehicleCleanup: vehClean,
+        vehicleCleanupRadius: vehRadius,
+        vehicleCleanupCenter: 'ORIGIN',
+        waypoints: []
+      };
+
+      state.groups.push(newGrp);
+      state.selectedGroupId = newId;
+
+      modalCreateGroup.classList.remove('open');
+      renderGroupList();
+      populatePointDropdowns();
+      syncActiveGroupUI();
+      drawMap();
+
+      // If experiment is running, dispatch CREATE_GROUP immediately
+      if (state.experiment.state === 'RUNNING') {
+        const origPt = state.savedPoints.find(p => p.id === origId);
+        const destPt = state.savedPoints.find(p => p.id === destId);
+        sendCommand('CREATE_GROUP', {
+          group_id: newGrp.id,
+          id: newGrp.id,
+          name: newGrp.name,
+          count: newGrp.count,
+          preset: newGrp.preset,
+          spawn_rate: newGrp.spawnRate,
+          origin: origPt ? { x: origPt.x, y: origPt.y } : null,
+          origin_radius: newGrp.originRadius,
+          destination: destPt ? { x: destPt.x, y: destPt.y } : null,
+          destination_radius: newGrp.destinationRadius,
+          move_speed: newGrp.speed,
+          behavior: newGrp.behavior,
+          arrival_behavior: newGrp.arrivalBehavior,
+          color: newGrp.color,
+          vehicle_cleanup: newGrp.vehicleCleanup,
+          vehicle_cleanup_radius: newGrp.vehicleCleanupRadius
+        });
+      }
+    });
+
+    /* =========================================================================
+       7. SAVED POINTS LIST & MANAGEMENT
+       ========================================================================= */
+    const savedPointsList = document.getElementById('saved-points-list');
+
+    function renderSavedPointsList() {
+      savedPointsList.innerHTML = '';
+      document.getElementById('lbl-points-count').textContent = state.savedPoints.length;
+
+      state.savedPoints.forEach(pt => {
+        const item = document.createElement('div');
+        item.className = 'point-item';
+        item.innerHTML = `
+          <div>
+            <strong style="cursor:pointer;" onclick="focusPoint(${pt.x}, ${pt.y})">${pt.name}</strong>
+            <div class="point-coords">(${pt.x}, ${pt.y})</div>
+          </div>
+          <div class="point-actions">
+            <button class="btn-xs" title="Assign as Origin for Selected Group" onclick="assignPointAsOrigin('${pt.id}')">🎯 Origin</button>
+            <button class="btn-xs" title="Assign as Destination for Selected Group" onclick="assignPointAsDest('${pt.id}')">🏁 Dest</button>
+            <button class="btn-xs" title="Rename Point" onclick="renamePoint('${pt.id}')">✏️</button>
+            <button class="btn-xs btn-xs-danger" title="Delete Point" onclick="deletePoint('${pt.id}')">🗑</button>
+          </div>
+        `;
+        savedPointsList.appendChild(item);
+      });
+    }
+
+    function focusPoint(wx, wy) {
+      const u = (wx - MAP_X_MIN) / WORLD_W;
+      const v = (MAP_Y_MAX - wy) / WORLD_H;
+      state.panX = u * IMG_DIM;
+      state.panY = v * IMG_DIM;
+      state.followPlayer = false;
+      updateFollowBtn();
+      drawMap();
+    }
+
+    function assignPointAsOrigin(ptId) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.originPointId = ptId;
+        syncActiveGroupUI();
+        drawMap();
+      }
+    }
+
+    function assignPointAsDest(ptId) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.destinationPointId = ptId;
+        syncActiveGroupUI();
+        drawMap();
+      }
+    }
+
+    function renamePoint(ptId) {
+      const pt = state.savedPoints.find(p => p.id === ptId);
+      if (!pt) return;
+      const newName = prompt('Enter new point name:', pt.name);
+      if (newName && newName.trim()) {
+        pt.name = newName.trim();
+        populatePointDropdowns();
+        renderSavedPointsList();
+        drawMap();
+      }
+    }
+
+    function deletePoint(ptId) {
+      if (confirm('Delete this point? Groups using it will need new endpoints.')) {
+        state.savedPoints = state.savedPoints.filter(p => p.id !== ptId);
+        populatePointDropdowns();
+        renderSavedPointsList();
+        drawMap();
+      }
+    }
+
+    document.getElementById('btn-add-point-manual').addEventListener('click', () => {
+      const name = prompt('Point Name:', `Point ${state.savedPoints.length + 1}`);
+      if (!name) return;
+      const wx = prompt('World X coordinate:', state.player.x !== null ? state.player.x.toFixed(1) : '-14.4');
+      const wy = prompt('World Y coordinate:', state.player.y !== null ? state.player.y.toFixed(1) : '-1438.5');
+      if (wx !== null && wy !== null) {
+        state.savedPoints.push({
+          id: `pt_${Date.now()}`,
+          name: name.trim(),
+          x: parseFloat(wx) || 0,
+          y: parseFloat(wy) || 0
+        });
+        populatePointDropdowns();
+        renderSavedPointsList();
+        drawMap();
+      }
+    });
+
+    /* =========================================================================
+       8. AMBIENT VEHICLE CLEANUP WORKFLOWS (BY RADIUS & CENTER)
+       ========================================================================= */
+    document.getElementById('cleanup-radius-val').addEventListener('input', (e) => {
+      document.getElementById('lbl-cleanup-radius-display').textContent = e.target.value;
+    });
+
+    // A. Manual General Vehicle Cleanup Button
+    document.getElementById('btn-execute-vehicle-cleanup').addEventListener('click', () => {
+      executeRadiusVehicleCleanup();
+    });
+    document.getElementById('btn-clean-vehicles-quick').addEventListener('click', () => {
+      executeRadiusVehicleCleanup();
+    });
+
+    // B. Group-Specific Vehicle Cleanup Button
+    document.getElementById('btn-clean-group-veh-now').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+
+      let center = null;
+      if (grp.vehicleCleanupCenter === 'DESTINATION') {
+        center = state.savedPoints.find(p => p.id === grp.destinationPointId);
+      } else {
+        center = state.savedPoints.find(p => p.id === grp.originPointId);
+      }
+
+      const rad = grp.vehicleCleanupRadius || 40.0;
+      const cx = center ? center.x : state.experiment.centerX;
+      const cy = center ? center.y : state.experiment.CenterY;
+
+      sendCommand('CLEANUP_VEHICLES', {
+        center_x: cx,
+        center_y: cy,
+        radius: rad
+      }, (res) => {
+        const count = res.game_response ? res.game_response.cleared_vehicles_count : 0;
+        alert(`Cleaned ${count} ambient vehicles within ${rad}m of group ${grp.name}.`);
+      });
+    });
+
+    function executeRadiusVehicleCleanup() {
+      const centerType = document.getElementById('cleanup-center-type').value;
+      const radius = parseFloat(document.getElementById('cleanup-radius-val').value) || 40.0;
+      let cx = state.experiment.centerX;
+      let cy = state.experiment.centerY;
+
+      if (centerType === 'SELECTED_GROUP') {
+        const grp = state.groups.find(g => g.id === state.selectedGroupId);
+        if (grp) {
+          const pt = state.savedPoints.find(p => p.id === grp.originPointId);
+          if (pt) { cx = pt.x; cy = pt.y; }
+        }
+      } else if (centerType === 'PLAYER') {
+        if (state.player.valid && state.player.x !== null) {
+          cx = state.player.x;
+          cy = state.player.y;
+        }
+      }
+
+      const statusLbl = document.getElementById('lbl-vehicle-cleanup-status');
+      statusLbl.textContent = 'Clearing vehicles...';
+
+      sendCommand('CLEANUP_VEHICLES', {
+        center_x: cx,
+        center_y: cy,
+        radius: radius
+      }, (res) => {
+        const count = res.game_response ? res.game_response.cleared_vehicles_count : 0;
+        statusLbl.textContent = `Cleared ${count} ambient vehicles within ${radius}m.`;
+        setTimeout(() => { statusLbl.textContent = ''; }, 4000);
+      });
+    }
+
+    /* =========================================================================
+       9. EXPERIMENT EXECUTION: UNIVERSAL START, PAUSE, STOP, RESET
+       ========================================================================= */
+    async function sendCommandAsync(cmd, payload = {}) {
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd, payload: payload })
+        });
+        const data = await res.json();
+        if (data.error) {
+          showToast(`Error: ${data.error}`, true);
+          return { ok: false, data };
+        }
+        if (data.game_response && data.game_response.status === 'ERROR') {
+          showToast(`Game Error: ${data.game_response.error || 'Failed'}`, true);
+          return { ok: false, data };
+        }
+        return { ok: true, data };
+      } catch (err) {
+        showToast(`Bridge error on ${cmd}`, true);
+        return { ok: false, error: err };
+      }
+    }
+
+    // UNIVERSAL START: Saves all inputs, syncs all enabled groups, and launches simulation
+    document.getElementById('btn-start-flow').addEventListener('click', async () => {
+      const activeGrp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (activeGrp) saveGroupFormInputs(activeGrp);
+
+      if (state.experiment.state === 'PAUSED') {
+        await sendCommandAsync('RESUME_EXPERIMENT', {});
+        state.experiment.state = 'RUNNING';
+        updateExperimentStateBadge();
+        updateGroupActionButtons();
+        showToast('Simulation Resumed');
+        return;
+      }
+
+      showToast('Starting simulation & spawning groups...');
+
+      // 1. Boundary
+      await sendCommandAsync('SET_EXPERIMENT', {
+        name: state.experiment.name,
+        shape: state.experiment.shape,
+        center: { x: state.experiment.centerX, y: state.experiment.centerY },
+        width: state.experiment.width,
+        height: state.experiment.height,
+        radius: state.experiment.radius
+      });
+
+      // 2. Synchronize and spawn all enabled groups
+      const enabledGroups = state.groups.filter(g => g.enabled);
+      for (const grp of enabledGroups) {
+        await sendCommandAsync('CREATE_GROUP', groupPayload(grp, { spawn: true, restart: false }));
+      }
+
+      // 3. Start experiment execution
+      await sendCommandAsync('START_EXPERIMENT', {});
+      state.experiment.state = 'RUNNING';
+      enabledGroups.forEach(g => {
+        g.status = 'SPAWNING';
+        if ((g.aliveCount || 0) < g.count) {
+          g.pendingCount = g.count - (g.aliveCount || 0);
+        }
+      });
+      updateExperimentStateBadge();
+      updateGroupActionButtons();
+      renderGroupList();
+      drawMap();
+      showToast('Simulation Running - All Groups Spawning');
+    });
+
+    // UNIVERSAL PAUSE: Halts movement and pauses all groups
+    document.getElementById('btn-pause-flow').addEventListener('click', async () => {
+      await sendCommandAsync('PAUSE_EXPERIMENT', {});
+      state.experiment.state = 'PAUSED';
+      state.groups.forEach(g => {
+        if (g.status === 'SPAWNING' || g.status === 'ACTIVE') g.status = 'PAUSED';
+      });
+      updateExperimentStateBadge();
+      updateGroupActionButtons();
+      renderGroupList();
+      showToast('Simulation Paused');
+    });
+
+    // UNIVERSAL STOP: Stops experiment and clears all pedestrians
+    document.getElementById('btn-stop-flow').addEventListener('click', async () => {
+      showToast('Stopping simulation and clearing pedestrians...');
+      await sendCommandAsync('STOP_EXPERIMENT', { clear_peds: true });
+      state.experiment.state = 'STOPPED';
+      state.groups.forEach(g => {
+        g.aliveCount = 0;
+        g.pendingCount = 0;
+        g.status = 'STOPPED';
+      });
+      state.livePeds = [];
+      updateExperimentStateBadge();
+      updateGroupActionButtons();
+      renderGroupList();
+      drawMap();
+      showToast('Simulation Stopped (All Pedestrians Cleared)');
+    });
+
+    document.getElementById('btn-reset-flow').addEventListener('click', () => {
+      if (confirm('Reset experiment and clear all managed peds?')) {
+        sendCommand('RESET_EXPERIMENT', {}, () => {
+          state.experiment.state = 'STOPPED';
+          updateExperimentStateBadge();
+        });
+        sendCommand('CLEAR_ALL_GROUPS', {});
+        sendCommand('CLEAR_PEDS', {});
+      }
+    });
+
+    function updateExperimentStateBadge() {
+      const badge = document.getElementById('badge-exp-state');
+      badge.textContent = state.experiment.state;
+      badge.className = `state-badge ${state.experiment.state.toLowerCase()}`;
+    }
+
+    /* =========================================================================
+       USER PATHS DATABASE WORKFLOW (CREATE, SAVE, APPLY, DELETE)
+       ========================================================================= */
+    function fetchPathsDB() {
+      fetch('/api/paths')
+        .then(r => r.json())
+        .then(data => {
+          state.pathsDB = data.paths || [];
+          renderPathsDB();
+        })
+        .catch(err => {
+          console.warn('Failed to load paths DB:', err);
+        });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderPathsDB() {
+      const container = document.getElementById('paths-db-list');
+      const countLbl = document.getElementById('lbl-paths-count');
+      if (countLbl) countLbl.textContent = state.pathsDB.length;
+      if (!container) return;
+
+      container.innerHTML = '';
+      if (state.pathsDB.length === 0) {
+        container.innerHTML = '<div style="font-size:0.70rem; color:#64748b; text-align:center; padding:12px;">No saved paths yet. Configure origin/destination on the map and click <strong>+ Save Path</strong>.</div>';
+        return;
+      }
+
+      state.pathsDB.forEach(path => {
+        const item = document.createElement('div');
+        item.className = 'path-db-item';
+
+        const origStr = path.origin ? `(${Math.round(path.origin.x)}, ${Math.round(path.origin.y)})` : 'None';
+        const destStr = path.destination ? `(${Math.round(path.destination.x)}, ${Math.round(path.destination.y)})` : 'None';
+        const wpCount = (path.waypoints && path.waypoints.length) ? path.waypoints.length : 0;
+
+        item.innerHTML = `
+          <div class="path-db-header">
+            <span class="path-db-title">${escapeHtml(path.name)}</span>
+            <span style="font-size:0.65rem; color:#38bdf8; font-family:'JetBrains Mono',monospace;">${wpCount} waypoints</span>
+          </div>
+          <div class="path-db-details">
+            <span><strong>From:</strong> ${origStr}</span>
+            <span>&rarr;</span>
+            <span><strong>To:</strong> ${destStr}</span>
+          </div>
+          <div class="path-db-actions">
+            <button class="btn btn-xs btn-primary btn-apply-path" style="flex:2;">Apply to Group</button>
+            <button class="btn btn-xs btn-danger btn-del-path" style="flex:1;">Delete</button>
+          </div>
+        `;
+
+        item.querySelector('.btn-apply-path').addEventListener('click', () => {
+          applyPathToGroup(path.id);
+        });
+
+        item.querySelector('.btn-del-path').addEventListener('click', () => {
+          if (confirm(`Delete saved path '${path.name}' from database?`)) {
+            deletePathFromDB(path.id);
+          }
+        });
+
+        container.appendChild(item);
+      });
+    }
+
+    function saveCurrentRouteAsPath() {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return alert('Please select a group first.');
+
+      const origPt = state.savedPoints.find(p => p.id === grp.originPointId);
+      const destPt = state.savedPoints.find(p => p.id === grp.destinationPointId);
+
+      if (!origPt && !destPt && (!grp.waypoints || grp.waypoints.length === 0)) {
+        return alert('Please configure an origin, destination, or waypoints before saving a path.');
+      }
+
+      const defaultName = grp.name ? `${grp.name} Path` : `User Path ${state.pathsDB.length + 1}`;
+      const pathName = prompt('Enter a name for this path in the database:', defaultName);
+      if (!pathName || !pathName.trim()) return;
+
+      const pathObj = {
+        id: `path_${Date.now()}`,
+        name: pathName.trim(),
+        origin: origPt ? { x: origPt.x, y: origPt.y, name: origPt.name } : null,
+        origin_radius: grp.originRadius || 10.0,
+        destination: destPt ? { x: destPt.x, y: destPt.y, name: destPt.name } : null,
+        destination_radius: grp.destinationRadius || 15.0,
+        waypoints: (grp.waypoints || []).map(w => ({ x: Math.round(w.x * 10) / 10, y: Math.round(w.y * 10) / 10 })),
+        speed: grp.speed || 1.0,
+        behavior: grp.behavior || 'ROUTE_TRAVEL',
+        arrival_behavior: grp.arrivalBehavior || 'WANDER',
+        color: grp.color || '#38bdf8'
+      };
+
+      fetch('/api/paths/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: pathObj })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (res.status === 'ok') {
+          fetchPathsDB();
+          alert(`Path '${pathObj.name}' saved to database successfully.`);
+        } else {
+          alert(`Failed saving path: ${res.error || 'Unknown error'}`);
+        }
+      })
+      .catch(err => alert(`Network error saving path: ${err}`));
+    }
+
+    function applyPathToGroup(pathId) {
+      const path = state.pathsDB.find(p => p.id === pathId);
+      if (!path) return;
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (!grp) return;
+
+      let origPt = null;
+      if (path.origin && path.origin.x !== undefined && path.origin.y !== undefined) {
+        origPt = state.savedPoints.find(p => Math.abs(p.x - path.origin.x) < 0.5 && Math.abs(p.y - path.origin.y) < 0.5);
+        if (!origPt) {
+          origPt = {
+            id: `pt_${Date.now()}_orig`,
+            name: path.origin.name || `${path.name} - Origin`,
+            x: path.origin.x,
+            y: path.origin.y
+          };
+          state.savedPoints.push(origPt);
+        }
+        grp.originPointId = origPt.id;
+        grp.originRadius = path.origin_radius || 10.0;
+      }
+
+      let destPt = null;
+      if (path.destination && path.destination.x !== undefined && path.destination.y !== undefined) {
+        destPt = state.savedPoints.find(p => Math.abs(p.x - path.destination.x) < 0.5 && Math.abs(p.y - path.destination.y) < 0.5);
+        if (!destPt) {
+          destPt = {
+            id: `pt_${Date.now()}_dest`,
+            name: path.destination.name || `${path.name} - Destination`,
+            x: path.destination.x,
+            y: path.destination.y
+          };
+          state.savedPoints.push(destPt);
+        }
+        grp.destinationPointId = destPt.id;
+        grp.destinationRadius = path.destination_radius || 15.0;
+      }
+
+      grp.waypoints = (path.waypoints || []).map(w => ({ x: w.x, y: w.y }));
+      grp.speed = path.speed || grp.speed;
+      grp.behavior = path.behavior || 'ROUTE_TRAVEL';
+      if (path.arrival_behavior) grp.arrivalBehavior = path.arrival_behavior;
+
+      populatePointDropdowns();
+      renderSavedPointsList();
+      syncActiveGroupUI();
+      drawMap();
+
+      syncGroup(grp, { spawn: false, restart: false }, () => {
+        showToast(`Path "${path.name}" applied to "${grp.name}"`);
+        updateGroupActionButtons();
+      });
+
+      const wpCountLbl = document.getElementById('lbl-wp-count');
+      if (wpCountLbl) wpCountLbl.textContent = grp.waypoints.length;
+    }
+
+    function deletePathFromDB(pathId) {
+      fetch('/api/paths/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: pathId })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (res.status === 'ok') {
+          fetchPathsDB();
+        } else {
+          alert(`Failed deleting path: ${res.error || 'Unknown error'}`);
+        }
+      })
+      .catch(err => alert(`Network error deleting path: ${err}`));
+    }
+
+    document.getElementById('btn-save-current-as-path').addEventListener('click', saveCurrentRouteAsPath);
+    const btnSaveRouteToDb = document.getElementById('btn-save-route-to-db');
+    if (btnSaveRouteToDb) btnSaveRouteToDb.addEventListener('click', saveCurrentRouteAsPath);
+
+    /* =========================================================================
+       10. SAVE / LOAD EXPERIMENT JSON
+       ========================================================================= */
+    document.getElementById('btn-save-exp').addEventListener('click', () => {
+      const expData = {
+        name: state.experiment.name,
+        experiment: state.experiment,
+        savedPoints: state.savedPoints,
+        groups: state.groups,
+        version: '4.0'
+      };
+
+      fetch('/api/experiment/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(expData)
+      })
+      .then(res => res.json())
+      .then(d => {
+        if (d.status === 'ok') alert(`Experiment saved as ${d.filename}`);
+        else alert(`Save failed: ${d.error}`);
+      })
+      .catch(err => alert(`Network error saving: ${err}`));
+    });
+
+    const modalLoadExp = document.getElementById('modal-load-exp');
+    document.getElementById('btn-load-exp').addEventListener('click', () => {
+      modalLoadExp.classList.add('open');
+      const listEl = document.getElementById('exp-file-list');
+      listEl.innerHTML = '<div style="color:#94a3b8; font-size:0.74rem;">Fetching experiments...</div>';
+
+      fetch('/api/experiment/list')
+        .then(r => r.json())
+        .then(data => {
+          listEl.innerHTML = '';
+          const files = data.experiments || [];
+          if (files.length === 0) {
+            listEl.innerHTML = '<div style="color:#94a3b8; font-size:0.74rem;">No saved experiments found.</div>';
+            return;
+          }
+          files.forEach(f => {
+            const row = document.createElement('div');
+            row.style.cssText = 'padding:6px 10px; background:#1e293b; border-radius:4px; display:flex; justify-content:space-between; align-items:center; cursor:pointer;';
+            row.innerHTML = `<span style="font-size:0.74rem;">${f.name || f.filename}</span><button class="btn-xs btn-primary">Load</button>`;
+            row.onclick = () => loadExpFile(f.filename);
+            listEl.appendChild(row);
+          });
+        })
+        .catch(e => { listEl.innerHTML = `<div style="color:#ef4444;">Error: ${e}</div>`; });
+    });
+    document.getElementById('btn-close-load-modal').addEventListener('click', () => {
+      modalLoadExp.classList.remove('open');
+    });
+
+    function loadExpFile(fname) {
+      fetch(`/api/experiment/load?name=${encodeURIComponent(fname)}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.experiment) Object.assign(state.experiment, d.experiment);
+          if (d.savedPoints) state.savedPoints = d.savedPoints;
+          if (d.groups) state.groups = d.groups;
+          if (state.groups.length > 0) state.selectedGroupId = state.groups[0].id;
+          modalLoadExp.classList.remove('open');
+          renderGroupList();
+          populatePointDropdowns();
+          syncActiveGroupUI();
+          renderSavedPointsList();
+          updateExperimentStateBadge();
+          drawMap();
+          alert(`Loaded experiment ${fname}`);
+        });
+    }
+
+    /* =========================================================================
+       11. COMMAND DISPATCHER & BRIDGE TELEMETRY POLLING
+       ========================================================================= */
+    function showToast(msg, isError = false) {
+      let t = document.getElementById('cs-toast');
+      if (!t) {
+        t = document.createElement('div');
+        t.id = 'cs-toast';
+        t.style.cssText = 'position:fixed;bottom:35px;right:20px;z-index:99999;padding:10px 16px;border-radius:6px;font-size:13px;font-family:sans-serif;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.5);transition:opacity 0.3s;pointer-events:none;';
+        document.body.appendChild(t);
+      }
+      t.style.background = isError ? 'rgba(239, 68, 68, 0.95)' : 'rgba(16, 185, 129, 0.95)';
+      t.textContent = msg;
+      t.style.opacity = '1';
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => { t.style.opacity = '0'; }, 3500);
+    }
+
+    function sendCommand(cmd, payload, callback) {
+      fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, payload: payload || {} })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          showToast(`Error: ${data.error}`, true);
+        } else if (data.game_response && data.game_response.status === 'ERROR') {
+          showToast(`Game Error: ${data.game_response.error || 'Failed'}`, true);
+        }
+        if (callback) callback(data);
+      })
+      .catch(err => {
+        console.error(`Error sending ${cmd}:`, err);
+        showToast(`Bridge error sending ${cmd}`, true);
+      });
+    }
+
+    let pollCount = 0;
+    function pollTelemetry() {
+      fetch('/api/telemetry')
+        .then(r => r.json())
+        .then(data => {
+          pollCount++;
+          document.getElementById('metric-polls').textContent = pollCount;
+
+          const dotGame = document.getElementById('dot-game');
+          const txtGame = document.getElementById('txt-game-status');
+          const isConnected = data.game_connected;
+
+          if (isConnected) {
+            dotGame.classList.remove('offline');
+            txtGame.textContent = 'GTA V: Connected (Active)';
+          } else {
+            dotGame.classList.add('offline');
+            txtGame.textContent = 'GTA V: Offline / Waiting...';
+          }
+
+          const tel = data.telemetry;
+          if (tel && tel.player && tel.player.valid) {
+            state.player.valid = true;
+            state.player.x = tel.player.x;
+            state.player.y = tel.player.y;
+            state.player.z = tel.player.z;
+            state.player.heading = tel.player.heading;
+            state.player.handle = tel.player.handle;
+
+            document.getElementById('txt-player-coords').textContent =
+              `Player: X: ${tel.player.x.toFixed(1)}, Y: ${tel.player.y.toFixed(1)}, Z: ${tel.player.z.toFixed(1)} (${tel.player.heading.toFixed(1)}°)`;
+
+            // Auto-follow Franklin if enabled
+            if (state.followPlayer) {
+              const u = (state.player.x - MAP_X_MIN) / WORLD_W;
+              const v = (MAP_Y_MAX - state.player.y) / WORLD_H;
+              state.panX = u * IMG_DIM;
+              state.panY = v * IMG_DIM;
+            }
+          } else {
+            state.player.valid = false;
+            document.getElementById('txt-player-coords').textContent =
+              'Player: ⚠️ Unavailable (Waiting for GTA V)';
+          }
+
+          if (tel && tel.experiment) {
+            state.experiment.state = tel.experiment.state || state.experiment.state;
+            updateExperimentStateBadge();
+          }
+
+          if (tel && tel.groups && Array.isArray(tel.groups)) {
+            let groupsChanged = false;
+            tel.groups.forEach(g => {
+              const grp = state.groups.find(x => x.id === g.group_id || x.name === g.name);
+              if (grp) {
+                if (grp.aliveCount !== g.alive_count || grp.status !== g.status || grp.pendingCount !== g.pending_count) {
+                  groupsChanged = true;
+                }
+                grp.aliveCount = g.alive_count;
+                grp.spawnedCount = g.spawned_count;
+                grp.failedCount = g.failed_count;
+                grp.pendingCount = g.pending_count;
+                grp.status = g.status;
+              }
+            });
+            if (groupsChanged) {
+              renderGroupList();
+              updateGroupActionButtons();
+            }
+          }
+
+          if (tel && tel.peds) {
+            state.livePeds = tel.peds;
+            document.getElementById('txt-active-peds-count').textContent = `Active Peds: ${tel.peds.length}`;
+            document.getElementById('metric-peds').textContent = tel.peds.length;
+          }
+
+          if (tel && tel.heatmap && tel.heatmap.cells) {
+            state.heatmapCells = tel.heatmap.cells;
+          }
+
+          drawMap();
+        })
+        .catch(err => {
+          document.getElementById('dot-game').classList.add('offline');
+          document.getElementById('txt-game-status').textContent = 'Bridge: Unreachable';
+          state.player.valid = false;
+          document.getElementById('txt-player-coords').textContent = 'Player: ⚠️ Telemetry Stale';
+        });
+    }
+
+    // Poll telemetry every 400ms for smooth live tracking
+    setInterval(pollTelemetry, 400);
+
+    /* =========================================================================
+       12. DRAGGABLE SPLITTER LOGIC & COLLAPSIBLE CARDS
+       ========================================================================= */
+    const splitter = document.getElementById('splitter');
+    const sidebarPane = document.getElementById('sidebar-pane');
+    let isResizing = false;
+
+    splitter.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      splitter.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth >= 300 && newWidth <= 750) {
+        sidebarPane.style.width = `${newWidth}px`;
+        resizeCanvas();
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        splitter.classList.remove('dragging');
+        document.body.style.cursor = 'default';
+        resizeCanvas();
+      }
+    });
+
+    document.getElementById('btn-toggle-sidebar').addEventListener('click', () => {
+      if (sidebarPane.style.display === 'none') {
+        sidebarPane.style.display = 'flex';
+        splitter.style.display = 'block';
+      } else {
+        sidebarPane.style.display = 'none';
+        splitter.style.display = 'none';
+      }
+      resizeCanvas();
+    });
+
+    function toggleCard(cardId) {
+      const card = document.getElementById(cardId);
+      if (card) {
+        card.classList.toggle('collapsed');
+      }
+    }
+
+    function scrollToSection(sectionId) {
+      const el = document.getElementById(sectionId);
+      if (el) {
+        el.classList.remove('collapsed');
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    // Prevent number inputs from trapping mouse wheel scrolling in sidebar
+    document.addEventListener('wheel', (e) => {
+      if (document.activeElement && document.activeElement.tagName === 'INPUT' && document.activeElement.type === 'number') {
+        document.activeElement.blur();
+      }
+    }, { passive: true });
+
+    /* =========================================================================
+       13. INITIALIZATION
+       ========================================================================= */
+    resizeCanvas();
+    renderGroupList();
+    populatePointDropdowns();
+    syncActiveGroupUI();
+    renderSavedPointsList();
+    updateExperimentStateBadge();
+
+    // Center on Franklin's house / South Los Santos on load
+    const initU = (-14.4 - MAP_X_MIN) / WORLD_W;
+    const initV = (MAP_Y_MAX - (-1438.5)) / WORLD_H;
+    state.panX = initU * IMG_DIM;
+    state.panY = initV * IMG_DIM;
+    state.zoom = 2.2;
+    drawMap();
+  </script>
+</body>
+</html>

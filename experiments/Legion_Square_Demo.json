@@ -1,0 +1,29 @@
+{
+  "name": "Legion Square Crossing",
+  "shape": "RECTANGLE",
+  "center": {
+    "x": 190.0,
+    "y": -950.0,
+    "z": 30.0
+  },
+  "width": 220.0,
+  "height": 220.0,
+  "cleanup_vehicles_on_start": false,
+  "groups": [
+    {
+      "name": "Northbound Commuters",
+      "count": 40,
+      "color": "#3b82f6"
+    },
+    {
+      "name": "Eastbound Tourists",
+      "count": 35,
+      "color": "#10b981"
+    },
+    {
+      "name": "Diagonal Shoppers",
+      "count": 30,
+      "color": "#f59e0b"
+    }
+  ]
+}

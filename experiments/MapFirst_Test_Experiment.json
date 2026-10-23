@@ -1,0 +1,40 @@
+{
+  "name": "MapFirst_Test_Experiment",
+  "shape": "RECTANGLE",
+  "center": {
+    "x": 195.0,
+    "y": -945.0,
+    "z": 30.0
+  },
+  "width": 240.0,
+  "height": 240.0,
+  "gridResolution": 8.0,
+  "cleanupVehiclesOnStart": false,
+  "saved_points": [
+    {
+      "id": "pt_test_1",
+      "name": "Test Point Alpha",
+      "x": 190.5,
+      "y": -950.2,
+      "z": 30.5
+    },
+    {
+      "id": "pt_test_2",
+      "name": "Test Point Beta",
+      "x": 210.0,
+      "y": -930.0,
+      "z": null
+    }
+  ],
+  "groups": [
+    {
+      "id": "grp_test_1",
+      "name": "Test Stream",
+      "enabled": true,
+      "count": 40,
+      "originPointId": "pt_test_1",
+      "destinationPointId": "pt_test_2",
+      "destinationRadius": 18.0
+    }
+  ]
+}
