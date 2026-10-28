@@ -1,0 +1,3656 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using GTA;
+using GTA.Math;
+using GTA.UI;
+using GTA.Native;
+
+namespace CrowdSim
+{
+    public class CrowdSimMain : Script
+    {
+        #region Constants & Configuration
+
+        // Stage 4 Population Limits & Fair Sharing (Unlocked via XtremeTool Runtime Limit Adjuster)
+        private const int MaxGroupPopulation = 5000;
+        private const int MaxTotalPopulation = 10000;
+        private const int DefaultGroupSize = 50;
+        private const int GlobalSpawnBudgetPerTick = 6; // Fair sharing: max 2 peds created per tick across all groups
+
+        private const string PollUrl = "http://127.0.0.1:8088/api/game/poll";
+        private const string AckUrl = "http://127.0.0.1:8088/api/game/ack";
+        private const string LogDirectory = @"C:\Users\Teja-Clove\GTA_crowd\logs";
+        private const string LogFilePath = @"C:\Users\Teja-Clove\GTA_crowd\logs\crowdsim.log";
+
+        #endregion
+
+        #region State & Concurrency Fields
+
+        private static readonly object _lock = new object();
+        private readonly Queue<CommandItem> _inboundQueue = new Queue<CommandItem>();
+        private readonly Queue<string> _outboundQueue = new Queue<string>();
+
+        private readonly List<CrowdPedRecord> _crowdRegistry = new List<CrowdPedRecord>();
+        private readonly Dictionary<string, CrowdGroup> _groups = new Dictionary<string, CrowdGroup>(StringComparer.OrdinalIgnoreCase);
+
+        private readonly Random _rng = new Random();
+        private readonly Thread _networkThread;
+        private volatile bool _isRunning = true;
+        private bool _isInitialized = false;
+        private DateTime _lastTickHeartbeat = DateTime.MinValue;
+        private long _groupCounter = 0;
+        private int _spawningRoundRobinIndex = 0;
+
+        // Thread-safe cached player telemetry
+        private Vector3 _cachedPlayerPos = Vector3.Zero;
+        private float _cachedPlayerHeading = 0f;
+        private int _cachedPlayerHandle = -1;
+        private bool _cachedPlayerValid = false;
+        private DateTime _lastPlayerUpdateUtc = DateTime.MinValue;
+
+        // Stage 4 Experiment State & Config
+        private class ExperimentConfig
+        {
+            public string State { get; set; } // "STOPPED", "RUNNING", "PAUSED"
+            public string Name { get; set; }
+            public string AreaType { get; set; } // "RECTANGLE", "CIRCLE"
+            public float CenterX { get; set; }
+            public float CenterY { get; set; }
+            public float CenterZ { get; set; }
+            public float Width { get; set; }
+            public float Height { get; set; }
+            public float Radius { get; set; }
+            public bool VehicleCleanup { get; set; }
+            public bool DespawnCheckpointEnabled { get; set; }
+            public Vector3? DespawnCheckpoint { get; set; }
+            public float DespawnRadius { get; set; }
+            public bool ContinuousStream { get; set; }
+            public int ExitedCount { get; set; }
+            public float GridResolution { get; set; }
+            public bool AllowOutsideRouting { get; set; }
+        }
+
+        private ExperimentConfig _experiment = new ExperimentConfig
+        {
+            State = "STOPPED",
+            Name = "Experiment_1",
+            AreaType = "RECTANGLE",
+            CenterX = 0f,
+            CenterY = 0f,
+            CenterZ = 0f,
+            Width = 150f,
+            Height = 150f,
+            Radius = 80f,
+            VehicleCleanup = false,
+            GridResolution = 10f,
+            AllowOutsideRouting = false
+        };
+
+        private class HeatmapCell
+        {
+            public int Col { get; set; }
+            public int Row { get; set; }
+            public float X { get; set; }
+            public float Y { get; set; }
+            public int Count { get; set; }
+            public Dictionary<string, int> GroupCounts { get; set; }
+        }
+
+        private readonly List<HeatmapCell> _currentHeatmapCells = new List<HeatmapCell>();
+        private DateTime _lastHeatmapUpdate = DateTime.MinValue;
+
+        #endregion
+
+        #region Script Initialization & Lifecycle
+
+        public CrowdSimMain()
+        {
+            Tick += OnTick;
+            Aborted += OnAborted;
+
+            Log("Script constructor called, starting background communication worker (Stage 4)...");
+
+            _networkThread = new Thread(NetworkWorkerLoop);
+            _networkThread.IsBackground = true;
+            _networkThread.Name = "CrowdSimNetworkWorker";
+            _networkThread.Start();
+        }
+
+        private void OnAborted(object sender, EventArgs e)
+        {
+            _isRunning = false;
+
+            try
+            {
+                // Release streaming models and clean up groups
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    ReleaseGroupModels(grp);
+                    grp.PendingCount = 0;
+                    grp.Status = "CANCELLED";
+                }
+
+                // Delete all CrowdSim-managed pedestrians on script unload
+                int deleted = 0;
+                lock (_lock)
+                {
+                    for (int i = 0; i < _crowdRegistry.Count; i++)
+                    {
+                        try
+                        {
+                            Ped p = Entity.FromHandle(_crowdRegistry[i].Handle) as Ped;
+                            if (p != null && p.Exists())
+                            {
+                                p.Delete();
+                                deleted++;
+                            }
+                        }
+                        catch { }
+                    }
+                    _crowdRegistry.Clear();
+                    _groups.Clear();
+                    _currentHeatmapCells.Clear();
+                }
+
+                Log(string.Format("SUCCESS: [CrowdSim] Script unloaded. Cleaned up {0} entities.", deleted));
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("ERROR: Exception during OnAborted cleanup: {0}", ex.Message));
+            }
+        }
+
+        #endregion
+
+        #region Game Thread OnTick
+
+        private void OnTick(object sender, EventArgs e)
+        {
+            try
+            {
+                // 0. Continuously update cached player position on game thread
+                try
+                {
+                    Player curPlayer = Game.Player;
+                    if (curPlayer != null && curPlayer.Character != null && curPlayer.Character.Exists())
+                    {
+                        Vector3 curPos = curPlayer.Character.Position;
+                        float curHead = curPlayer.Character.Heading;
+                        int curHandle = curPlayer.Character.Handle;
+                        lock (_lock)
+                        {
+                            _cachedPlayerPos = curPos;
+                            _cachedPlayerHeading = curHead;
+                            _cachedPlayerHandle = curHandle;
+                            _cachedPlayerValid = true;
+                            _lastPlayerUpdateUtc = DateTime.UtcNow;
+                        }
+                    }
+                }
+                catch { }
+                // 1. Rate-limited OnTick Heartbeat (every 2 seconds) and Registry Pruning
+                if ((DateTime.UtcNow - _lastTickHeartbeat).TotalSeconds >= 2.0)
+                {
+                    _lastTickHeartbeat = DateTime.UtcNow;
+
+                    // Prune dead or despawned peds from global registry
+                    lock (_lock)
+                    {
+                        for (int i = _crowdRegistry.Count - 1; i >= 0; i--)
+                        {
+                            Ped p = Entity.FromHandle(_crowdRegistry[i].Handle) as Ped;
+                            if (p == null || !p.Exists() || p.IsDead)
+                            {
+                                int prunedHandle = _crowdRegistry[i].Handle;
+                                string prunedGrpId = _crowdRegistry[i].GroupId;
+                                _crowdRegistry.RemoveAt(i);
+                                Log(string.Format("WARN: Managed entity {0} in group '{1}' disappeared or died (Exists: {2}, Dead: {3}). Pruned from registry.",
+                                    prunedHandle, prunedGrpId, p != null && p.Exists(), p != null && p.IsDead));
+                            }
+                        }
+                    }
+
+                    // Prune dead handles from group member lists
+                    foreach (CrowdGroup grp in _groups.Values)
+                    {
+                        for (int i = grp.MemberHandles.Count - 1; i >= 0; i--)
+                        {
+                            Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                            if (p == null || !p.Exists() || p.IsDead)
+                            {
+                                grp.MemberHandles.RemoveAt(i);
+                            }
+                        }
+
+                        // Re-elect leader if leader died or was pruned
+                        if (grp.Behavior == "FOLLOW_LEADER" && grp.LeaderHandle != 0)
+                        {
+                            Ped leader = Entity.FromHandle(grp.LeaderHandle) as Ped;
+                            if (leader == null || !leader.Exists() || leader.IsDead)
+                            {
+                                ElectNewLeader(grp);
+                            }
+                        }
+
+                        // Mark active group COMPLETED only if it reached target AND all members departed
+                        if (grp.Status == "ACTIVE" && grp.PendingCount == 0 && grp.MemberHandles.Count == 0 && grp.SpawnedCount >= grp.TargetCount && grp.TargetCount > 0)
+                        {
+                            grp.Status = "COMPLETED";
+                            Log(string.Format("INFO: Group {0} ('{1}') marked COMPLETED (all {2} members departed).", grp.GroupId, grp.Name, grp.SpawnedCount));
+                        }
+                    }
+
+                    int inCount = 0;
+                    int outCount = 0;
+                    lock (_lock)
+                    {
+                        inCount = _inboundQueue.Count;
+                        outCount = _outboundQueue.Count;
+                    }
+
+                    int activeGroups = 0;
+                    int spawningGroups = 0;
+                    foreach (CrowdGroup grp in _groups.Values)
+                    {
+                        if (grp.Status == "ACTIVE") activeGroups++;
+                        else if (grp.Status == "SPAWNING") spawningGroups++;
+                    }
+
+                    Log(string.Format("DIAG: Heartbeat (Initialized: {0}, InQueue: {1}, OutQueue: {2}, ManagedPeds: {3}, ActiveGroups: {4}, SpawningGroups: {5}, ExpState: {6})",
+                        _isInitialized, inCount, outCount, _crowdRegistry.Count, activeGroups, spawningGroups, _experiment.State));
+
+                    foreach (CrowdGroup gSummary in _groups.Values)
+                    {
+                        Log(string.Format("GROUP_SUMMARY: [{0} / '{1}'] Status: {2}, Alive: {3}, Target: {4}, Spawned: {5}, Pending: {6}, Failed: {7}, Rate: {8}/s",
+                            gSummary.GroupId, gSummary.Name, gSummary.Status, gSummary.MemberHandles.Count, gSummary.TargetCount, gSummary.SpawnedCount, gSummary.PendingCount, gSummary.FailedCount, gSummary.SpawnRate));
+                    }
+                }
+
+                // 2. Baseline Initialization (runs once when player character exists)
+                if (!_isInitialized)
+                {
+                    Player player = Game.Player;
+                    if (player != null && player.Character != null && player.Character.Exists())
+                    {
+                        _isInitialized = true;
+                        Vector3 playerPos = player.Character.Position;
+                        _experiment.CenterX = (float)Math.Round(playerPos.X, 2);
+                        _experiment.CenterY = (float)Math.Round(playerPos.Y, 2);
+                        _experiment.CenterZ = (float)Math.Round(playerPos.Z, 2);
+
+                        Notification.PostTicker("~g~[CrowdSim]~s~ Stage 4 Loaded (Map & Routes)", true, true);
+                        Screen.ShowSubtitle("~b~[CrowdSim]~s~ Stage 4 Active", 3000);
+                        Log(string.Format("SUCCESS: [CrowdSim] Script loaded successfully! Player handle: {0}, Pos: ({1}, {2}, {3})",
+                            player.Character.Handle, _experiment.CenterX, _experiment.CenterY, _experiment.CenterZ));
+                    }
+                    return;
+                }
+
+                // 3. Process Inbound Command (one command per frame to avoid frame drop)
+                CommandItem command = null;
+                lock (_lock)
+                {
+                    if (_inboundQueue.Count > 0)
+                    {
+                        command = _inboundQueue.Dequeue();
+                    }
+                }
+
+                if (command != null)
+                {
+                    Log(string.Format("DIAG: OnTick dequeued command: {0} (ReqID: {1})", command.Command, command.RequestId));
+                    ProcessGameCommand(command);
+                }
+
+                // Suppress ambient civilians during active simulation so all slots belong to CrowdSim
+                if (_experiment.State == "RUNNING")
+                {
+                    Function.Call(Hash.SET_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+                    Function.Call(Hash.SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f, 0.0f);
+                }
+
+                // 4. Global Fair Round-Robin Spawner (max 2 peds created per tick across all groups)
+                if (_experiment.State != "PAUSED")
+                {
+                    TickSpawningGroups();
+                }
+
+                // 5. Group Behavior & Route Controllers (throttled internally per group)
+                TickGroupBehaviors();
+
+                // 6. Stage 4 Heatmap Grid Aggregation (every 500ms)
+                UpdateHeatmapGrid();
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("ERROR: Unhandled exception in OnTick: {0}", ex.ToString()));
+            }
+        }
+
+        #endregion
+
+        #region Stage 4 Experiment Boundary & Vehicle Cleanup
+
+        private bool IsInsideExperimentArea(Vector3 pt)
+        {
+            if (_experiment == null) return true;
+            if (_experiment.AreaType == "CIRCLE")
+            {
+                float dx = pt.X - _experiment.CenterX;
+                float dy = pt.Y - _experiment.CenterY;
+                return (dx * dx + dy * dy) <= (_experiment.Radius * _experiment.Radius);
+            }
+            else // RECTANGLE
+            {
+                float halfW = _experiment.Width / 2.0f;
+                float halfH = _experiment.Height / 2.0f;
+                return Math.Abs(pt.X - _experiment.CenterX) <= halfW && Math.Abs(pt.Y - _experiment.CenterY) <= halfH;
+            }
+        }
+
+        private int PerformSafeVehicleCleanup(float? customCenterX = null, float? customCenterY = null, float? customRadius = null)
+        {
+            int cleaned = 0;
+            try
+            {
+                Ped playerPed = (Game.Player != null) ? Game.Player.Character : null;
+                Vehicle playerVeh = (playerPed != null && playerPed.Exists() && playerPed.IsInVehicle()) ? playerPed.CurrentVehicle : null;
+                int playerVehHandle = (playerVeh != null && playerVeh.Exists()) ? playerVeh.Handle : 0;
+
+                Vehicle[] allVehs = World.GetAllVehicles();
+                if (allVehs == null) return 0;
+
+                foreach (Vehicle veh in allVehs)
+                {
+                    if (veh == null || !veh.Exists()) continue;
+                    if (playerVehHandle != 0 && veh.Handle == playerVehHandle) continue;
+                    if (veh.IsPersistent) continue; // Skip mission/scripted protected vehicles
+
+                    // Exclude vehicles occupied by player (as driver or passenger)
+                    if (!veh.IsSeatFree(VehicleSeat.Driver) && veh.Driver != null && veh.Driver.Exists() && veh.Driver.IsPlayer) continue;
+                    if (playerPed != null && playerPed.Exists() && playerPed.IsInVehicle())
+                    {
+                        Vehicle curV = playerPed.CurrentVehicle;
+                        if (curV != null && curV.Handle == veh.Handle) continue;
+                    }
+
+                    Vector3 pos = veh.Position;
+                    bool shouldClean = false;
+                    if (customCenterX.HasValue && customCenterY.HasValue && customRadius.HasValue)
+                    {
+                        float dx = pos.X - customCenterX.Value;
+                        float dy = pos.Y - customCenterY.Value;
+                        if ((dx * dx + dy * dy) <= (customRadius.Value * customRadius.Value))
+                        {
+                            shouldClean = true;
+                        }
+                    }
+                    else
+                    {
+                        shouldClean = IsInsideExperimentArea(pos);
+                    }
+
+                    if (shouldClean)
+                    {
+                        veh.Delete();
+                        cleaned++;
+                    }
+                }
+
+                Log(string.Format("INFO: Safe vehicle cleanup completed. Removed {0} ambient vehicles (Center: {1},{2}, Radius: {3}).",
+                    cleaned,
+                    customCenterX.HasValue ? customCenterX.Value.ToString("F1", CultureInfo.InvariantCulture) : "Area",
+                    customCenterY.HasValue ? customCenterY.Value.ToString("F1", CultureInfo.InvariantCulture) : "Area",
+                    customRadius.HasValue ? customRadius.Value.ToString("F1", CultureInfo.InvariantCulture) : "Area"));
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("WARN: Exception during ambient vehicle cleanup: {0}", ex.Message));
+            }
+            return cleaned;
+        }
+
+        private void UpdateHeatmapGrid()
+        {
+            if ((DateTime.UtcNow - _lastHeatmapUpdate).TotalMilliseconds < 500) return;
+            _lastHeatmapUpdate = DateTime.UtcNow;
+
+            float res = Math.Max(5.0f, Math.Min(50.0f, _experiment.GridResolution));
+            Dictionary<string, HeatmapCell> cellMap = new Dictionary<string, HeatmapCell>();
+
+            lock (_lock)
+            {
+                for (int i = 0; i < _crowdRegistry.Count; i++)
+                {
+                    CrowdPedRecord rec = _crowdRegistry[i];
+                    Ped p = Entity.FromHandle(rec.Handle) as Ped;
+                    if (p != null && p.Exists() && !p.IsDead)
+                    {
+                        Vector3 pos = p.Position;
+                        if (IsInsideExperimentArea(pos))
+                        {
+                            int col = (int)Math.Floor(pos.X / res);
+                            int row = (int)Math.Floor(pos.Y / res);
+                            string key = col + "_" + row;
+
+                            HeatmapCell cell;
+                            if (!cellMap.TryGetValue(key, out cell))
+                            {
+                                cell = new HeatmapCell
+                                {
+                                    Col = col,
+                                    Row = row,
+                                    X = (float)Math.Round((col + 0.5f) * res, 2),
+                                    Y = (float)Math.Round((row + 0.5f) * res, 2),
+                                    Count = 0,
+                                    GroupCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                                };
+                                cellMap[key] = cell;
+                            }
+
+                            cell.Count++;
+                            string grpId = rec.GroupId ?? "default";
+                            if (!cell.GroupCounts.ContainsKey(grpId))
+                                cell.GroupCounts[grpId] = 0;
+                            cell.GroupCounts[grpId]++;
+                        }
+                    }
+                }
+
+                _currentHeatmapCells.Clear();
+                _currentHeatmapCells.AddRange(cellMap.Values);
+            }
+        }
+
+        #endregion
+
+        #region Command Processing
+
+        private void ProcessGameCommand(CommandItem cmd)
+        {
+            try
+            {
+                switch (cmd.Command.ToUpperInvariant())
+                {
+                    case "PING_GAME":
+                        ProcessPingCommand(cmd);
+                        break;
+
+                    case "SPAWN_PED":
+                        ProcessSpawnPedCommand(cmd);
+                        break;
+
+                    case "CLEAR_PEDS":
+                        ProcessClearPedsCommand(cmd);
+                        break;
+
+                    case "CREATE_GROUP":
+                        ProcessCreateGroupCommand(cmd);
+                        break;
+
+                    case "GET_GROUPS":
+                        ProcessGetGroupsCommand(cmd);
+                        break;
+
+                    case "GET_GROUP_STATUS":
+                        ProcessGetGroupStatusCommand(cmd);
+                        break;
+
+                    case "REMOVE_GROUP":
+                        ProcessRemoveGroupCommand(cmd);
+                        break;
+
+                    case "CLEAR_ALL_GROUPS":
+                        ProcessClearAllGroupsCommand(cmd);
+                        break;
+
+                    case "UPDATE_GROUP":
+                        ProcessUpdateGroupCommand(cmd);
+                        break;
+
+                    case "START_GROUP":
+                        ProcessStartGroupCommand(cmd);
+                        break;
+
+                    case "PAUSE_GROUP":
+                        ProcessPauseGroupCommand(cmd);
+                        break;
+
+                    case "SET_GROUP_LEADER":
+                        ProcessSetGroupLeaderCommand(cmd);
+                        break;
+
+                    case "SET_EXPERIMENT":
+                        ProcessSetExperimentCommand(cmd);
+                        break;
+
+                    case "START_EXPERIMENT":
+                        ProcessStartExperimentCommand(cmd);
+                        break;
+
+                    case "PAUSE_EXPERIMENT":
+                        ProcessPauseExperimentCommand(cmd);
+                        break;
+
+                    case "RESUME_EXPERIMENT":
+                        ProcessResumeExperimentCommand(cmd);
+                        break;
+
+                    case "STOP_EXPERIMENT":
+                        ProcessStopExperimentCommand(cmd);
+                        break;
+
+                    case "RESET_EXPERIMENT":
+                        ProcessResetExperimentCommand(cmd);
+                        break;
+
+                    case "CLEANUP_VEHICLES":
+                        ProcessCleanupVehiclesCommand(cmd);
+                        break;
+
+                    case "GET_TELEMETRY":
+                        ProcessGetTelemetryCommand(cmd);
+                        break;
+
+                    default:
+                        SendErrorAck(cmd, string.Format("Unknown command: '{0}'", cmd.Command));
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("ERROR: Command execution threw: {0}", ex.Message));
+                SendErrorAck(cmd, "Unhandled exception: " + ex.Message);
+            }
+        }
+
+        private void ProcessPingCommand(CommandItem cmd)
+        {
+            Player player = Game.Player;
+            int playerHandle = (player != null && player.Character != null) ? player.Character.Handle : -1;
+            int gameTime = Game.GameTime;
+
+            Vector3 pos = (player != null && player.Character != null) ? player.Character.Position : Vector3.Zero;
+            float heading = (player != null && player.Character != null) ? player.Character.Heading : 0f;
+
+            Log(string.Format("DIAG: Processed PING_GAME (PlayerHandle: {0}, GameTime: {1}, ReqID: {2}, Pos: {3},{4})",
+                playerHandle, gameTime, cmd.RequestId, Math.Round(pos.X, 1), Math.Round(pos.Y, 1)));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["player_handle"] = playerHandle;
+            ackData["game_time"] = gameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            Dictionary<string, object> posDict = new Dictionary<string, object>();
+            posDict["x"] = Math.Round(pos.X, 2);
+            posDict["y"] = Math.Round(pos.Y, 2);
+            posDict["z"] = Math.Round(pos.Z, 2);
+            posDict["heading"] = Math.Round(heading, 1);
+            ackData["player_position"] = posDict;
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessSpawnPedCommand(CommandItem cmd)
+        {
+            string modelName = "a_m_y_hipster_01";
+            float distance = 4.0f;
+
+            if (cmd.Payload != null)
+            {
+                if (cmd.Payload.ContainsKey("model") && cmd.Payload["model"] != null)
+                {
+                    string m = Convert.ToString(cmd.Payload["model"]).Trim();
+                    if (!string.IsNullOrEmpty(m)) modelName = m;
+                }
+                if (cmd.Payload.ContainsKey("distance") && cmd.Payload["distance"] != null)
+                {
+                    float d;
+                    if (float.TryParse(Convert.ToString(cmd.Payload["distance"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out d))
+                    {
+                        distance = Math.Max(2.0f, Math.Min(10.0f, d));
+                    }
+                }
+            }
+
+            // Cap validation against total population limit
+            int currentTotal;
+            lock (_lock) { currentTotal = _crowdRegistry.Count; }
+            if (currentTotal >= MaxTotalPopulation)
+            {
+                SendErrorAck(cmd, string.Format("Total population limit reached ({0}/{1}).", currentTotal, MaxTotalPopulation));
+                return;
+            }
+
+            Model model = new Model(modelName);
+            if (!model.IsValid)
+            {
+                SendErrorAck(cmd, string.Format("Invalid pedestrian model: '{0}'", modelName));
+                return;
+            }
+
+            if (!model.IsLoaded)
+            {
+                model.Request(1500);
+                if (!model.IsLoaded)
+                {
+                    model.MarkAsNoLongerNeeded();
+                    SendErrorAck(cmd, string.Format("Model streaming timeout (1500ms): '{0}'", modelName));
+                    return;
+                }
+            }
+
+            Player player = Game.Player;
+            if (player == null || player.Character == null || !player.Character.Exists())
+            {
+                model.MarkAsNoLongerNeeded();
+                SendErrorAck(cmd, "Player character not found in world.");
+                return;
+            }
+
+            Ped playerPed = player.Character;
+            Vector3 forward = playerPed.ForwardVector;
+            Vector3 targetSpawnPos = playerPed.Position + (forward * distance);
+
+            Ped spawnedPed = null;
+            try
+            {
+                spawnedPed = Ped.Create(model, targetSpawnPos, (playerPed.Heading + 180f) % 360f);
+            }
+            catch (Exception ex)
+            {
+                model.MarkAsNoLongerNeeded();
+                SendErrorAck(cmd, string.Format("World.CreatePed failed: {0}", ex.Message));
+                return;
+            }
+
+            if (spawnedPed == null || !spawnedPed.Exists())
+            {
+                model.MarkAsNoLongerNeeded();
+                SendErrorAck(cmd, "World.CreatePed returned null or invalid entity.");
+                return;
+            }
+
+            model.MarkAsNoLongerNeeded();
+
+            try
+            {
+                spawnedPed.IsPersistent = true;
+                spawnedPed.BlockPermanentEvents = true;
+                spawnedPed.Task.WanderAround(spawnedPed.Position, 25.0f);
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("WARN: Task assignment threw on ped {0}: {1}", spawnedPed.Handle, ex.Message));
+            }
+
+            lock (_lock)
+            {
+                _crowdRegistry.Add(new CrowdPedRecord
+                {
+                    Handle = spawnedPed.Handle,
+                    ModelName = modelName,
+                    CreatedAt = DateTime.UtcNow,
+                    GroupId = null
+                });
+            }
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["entity_handle"] = spawnedPed.Handle;
+            ackData["model"] = modelName;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            Dictionary<string, object> coords = new Dictionary<string, object>();
+            coords["x"] = Math.Round(spawnedPed.Position.X, 2);
+            coords["y"] = Math.Round(spawnedPed.Position.Y, 2);
+            coords["z"] = Math.Round(spawnedPed.Position.Z, 2);
+            ackData["spawn_coords"] = coords;
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessClearPedsCommand(CommandItem cmd)
+        {
+            int cleared = 0;
+            int failed = 0;
+            string targetGroupId = "";
+            if (cmd.Payload != null)
+            {
+                if (cmd.Payload.ContainsKey("group_id")) targetGroupId = Convert.ToString(cmd.Payload["group_id"]).Trim();
+                else if (cmd.Payload.ContainsKey("id")) targetGroupId = Convert.ToString(cmd.Payload["id"]).Trim();
+            }
+
+            lock (_lock)
+            {
+                if (!string.IsNullOrEmpty(targetGroupId))
+                {
+                    if (_groups.ContainsKey(targetGroupId))
+                    {
+                        CrowdGroup grp = _groups[targetGroupId];
+                        for (int i = 0; i < grp.MemberHandles.Count; i++)
+                        {
+                            try
+                            {
+                                Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                                if (p != null && p.Exists())
+                                {
+                                    p.IsPersistent = false;
+                                    p.Delete();
+                                    cleared++;
+                                }
+                            }
+                            catch
+                            {
+                                failed++;
+                            }
+                        }
+                        _crowdRegistry.RemoveAll(delegate (CrowdPedRecord r) { return r.GroupId == targetGroupId; });
+                        grp.MemberHandles.Clear();
+                        grp.SpawnedCount = 0;
+                        grp.PendingCount = 0;
+                        grp.Status = "CONFIGURED";
+                        ReleaseGroupModels(grp);
+                        Log(string.Format("INFO: Cleared {0} pedestrians for group '{1}' ({2}) (Failed: {3})", cleared, grp.Name, targetGroupId, failed));
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < _crowdRegistry.Count; i++)
+                    {
+                        try
+                        {
+                            Ped p = Entity.FromHandle(_crowdRegistry[i].Handle) as Ped;
+                            if (p != null && p.Exists())
+                            {
+                                p.IsPersistent = false;
+                                p.Delete();
+                                cleared++;
+                            }
+                        }
+                        catch
+                        {
+                            failed++;
+                        }
+                    }
+                    _crowdRegistry.Clear();
+
+                    foreach (CrowdGroup grp in _groups.Values)
+                    {
+                        grp.MemberHandles.Clear();
+                        grp.LeaderHandle = 0;
+                        grp.SpawnedCount = 0;
+                        grp.PendingCount = 0;
+                        grp.Status = "CONFIGURED";
+                        ReleaseGroupModels(grp);
+                    }
+                    Log(string.Format("INFO: Cleared all {0} CrowdSim pedestrians (Failed: {1})", cleared, failed));
+                }
+            }
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["cleared_count"] = cleared;
+            ackData["failed_count"] = failed;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessCreateGroupCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> payload = cmd.Payload ?? new Dictionary<string, object>();
+
+            string groupName = payload.ContainsKey("name") ? Convert.ToString(payload["name"]).Trim() : "";
+            if (string.IsNullOrEmpty(groupName))
+            {
+                groupName = "Group_" + (++_groupCounter);
+            }
+
+            int targetCount = DefaultGroupSize;
+            if (payload.ContainsKey("count") && payload["count"] != null)
+            {
+                int c;
+                if (int.TryParse(Convert.ToString(payload["count"]), out c))
+                {
+                    targetCount = Math.Max(1, Math.Min(MaxGroupPopulation, c));
+                }
+            }
+
+            // Global Population Capacity Check
+            int totalActiveAndPending = 0;
+            lock (_lock)
+            {
+                totalActiveAndPending = _crowdRegistry.Count;
+                foreach (CrowdGroup g in _groups.Values)
+                {
+                    if (g.Status == "SPAWNING")
+                    {
+                        totalActiveAndPending += g.PendingCount;
+                    }
+                }
+            }
+
+            if (totalActiveAndPending + targetCount > MaxTotalPopulation)
+            {
+                int remainingAllowed = Math.Max(0, MaxTotalPopulation - totalActiveAndPending);
+                SendErrorAck(cmd, string.Format("Total population limit ({0}) exceeded. Currently active/pending: {1}. Maximum allowed new peds: {2}.",
+                    MaxTotalPopulation, totalActiveAndPending, remainingAllowed));
+                return;
+            }
+
+            float spawnRadius = 20.0f;
+            if (payload.ContainsKey("spawn_radius"))
+            {
+                float sr;
+                if (float.TryParse(Convert.ToString(payload["spawn_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sr))
+                    spawnRadius = Math.Max(5.0f, Math.Min(150.0f, sr));
+            }
+            else if (payload.ContainsKey("radius"))
+            {
+                float r;
+                if (float.TryParse(Convert.ToString(payload["radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out r))
+                    spawnRadius = Math.Max(5.0f, Math.Min(150.0f, r));
+            }
+
+            float moveRadius = 30.0f;
+            if (payload.ContainsKey("movement_radius"))
+            {
+                float mr;
+                if (float.TryParse(Convert.ToString(payload["movement_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out mr))
+                    moveRadius = Math.Max(5.0f, Math.Min(150.0f, mr));
+            }
+
+            float spawnRate = 2.0f;
+            if (payload.ContainsKey("spawn_rate"))
+            {
+                float srate;
+                if (float.TryParse(Convert.ToString(payload["spawn_rate"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out srate))
+                    spawnRate = Math.Max(0.5f, Math.Min(100.0f, srate));
+            }
+
+            string behavior = "INDEPENDENT_WANDER";
+            if (payload.ContainsKey("behavior") && payload["behavior"] != null)
+            {
+                string b = Convert.ToString(payload["behavior"]).Trim().ToUpperInvariant();
+                if (!string.IsNullOrEmpty(b)) behavior = b;
+            }
+
+            float followDistance = 3.0f;
+            if (payload.ContainsKey("follow_distance"))
+            {
+                float fd;
+                if (float.TryParse(Convert.ToString(payload["follow_distance"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out fd))
+                    followDistance = Math.Max(1.0f, Math.Min(20.0f, fd));
+            }
+
+            bool densityAware = false;
+            if (payload.ContainsKey("density_aware"))
+            {
+                bool da;
+                if (bool.TryParse(Convert.ToString(payload["density_aware"]), out da))
+                    densityAware = da;
+            }
+
+            float densityLimit = 0.2f;
+            if (payload.ContainsKey("density_limit"))
+            {
+                float dl;
+                if (float.TryParse(Convert.ToString(payload["density_limit"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dl))
+                    densityLimit = Math.Max(0.01f, Math.Min(5.0f, dl));
+            }
+
+            // Stage 4 Route Parameters: Origin, Destination, Waypoints, Speed, ArrivalBehavior, Color
+            Vector3? explicitOrigin = null;
+            float originRadius = spawnRadius;
+            if (payload.ContainsKey("origin") && payload["origin"] is Dictionary<string, object>)
+            {
+                explicitOrigin = ParseVector3Dict((Dictionary<string, object>)payload["origin"]);
+            }
+            if (payload.ContainsKey("origin_radius"))
+            {
+                float orad;
+                if (float.TryParse(Convert.ToString(payload["origin_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out orad))
+                    originRadius = Math.Max(2.0f, Math.Min(100.0f, orad));
+            }
+
+            Vector3? explicitDestination = null;
+            float destRadius = 8.0f;
+            if (payload.ContainsKey("destination") && payload["destination"] is Dictionary<string, object>)
+            {
+                explicitDestination = ParseVector3Dict((Dictionary<string, object>)payload["destination"]);
+            }
+            if (payload.ContainsKey("destination_radius"))
+            {
+                float dr;
+                if (float.TryParse(Convert.ToString(payload["destination_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dr))
+                    destRadius = Math.Max(2.0f, Math.Min(100.0f, dr));
+            }
+
+            List<Vector3> waypoints = new List<Vector3>();
+            if (payload.ContainsKey("waypoints") && payload["waypoints"] is System.Collections.IEnumerable)
+            {
+                foreach (object wObj in (System.Collections.IEnumerable)payload["waypoints"])
+                {
+                    if (wObj is Dictionary<string, object>)
+                    {
+                        Vector3? wpt = ParseVector3Dict((Dictionary<string, object>)wObj);
+                        if (wpt.HasValue) waypoints.Add(wpt.Value);
+                    }
+                }
+            }
+
+            float moveSpeed = 1.4f;
+            string speedKey = payload.ContainsKey("move_speed") ? "move_speed" : "speed";
+            if (payload.ContainsKey(speedKey))
+            {
+                float spd;
+                if (float.TryParse(Convert.ToString(payload[speedKey], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out spd))
+                    moveSpeed = Math.Max(0.5f, Math.Min(4.0f, spd));
+            }
+
+            string arrivalBehavior = "WANDER";
+            if (payload.ContainsKey("arrival_behavior") && payload["arrival_behavior"] != null)
+            {
+                string ab = Convert.ToString(payload["arrival_behavior"]).Trim().ToUpperInvariant();
+                if (!string.IsNullOrEmpty(ab)) arrivalBehavior = ab;
+            }
+
+            string groupColor = "#38bdf8";
+            if (payload.ContainsKey("color") && payload["color"] != null)
+            {
+                string col = Convert.ToString(payload["color"]).Trim();
+                if (!string.IsNullOrEmpty(col)) groupColor = col;
+            }
+
+            bool despawnChkEnabled = false;
+            if (payload.ContainsKey("despawn_checkpoint_enabled"))
+                bool.TryParse(Convert.ToString(payload["despawn_checkpoint_enabled"]), out despawnChkEnabled);
+            Vector3? despawnCheckpoint = null;
+            if (payload.ContainsKey("despawn_checkpoint") && payload["despawn_checkpoint"] is Dictionary<string, object>)
+                despawnCheckpoint = ParseVector3Dict((Dictionary<string, object>)payload["despawn_checkpoint"]);
+            float despawnRadius = 8.0f;
+            if (payload.ContainsKey("despawn_radius"))
+            {
+                float dr;
+                if (float.TryParse(Convert.ToString(payload["despawn_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dr))
+                    despawnRadius = Math.Max(2.0f, Math.Min(100.0f, dr));
+            }
+
+            bool contStream = true;
+            if (payload.ContainsKey("continuous_stream"))
+                bool.TryParse(Convert.ToString(payload["continuous_stream"]), out contStream);
+
+            // If destination is specified, behavior defaults to ROUTE_TRAVEL
+            if (explicitDestination.HasValue && behavior == "INDEPENDENT_WANDER")
+            {
+                behavior = "ROUTE_TRAVEL";
+            }
+
+            // Parse Models list
+            List<ModelCatalogItem> catalog = new List<ModelCatalogItem>();
+            string primaryModel = "a_m_y_hipster_01";
+
+            if (payload.ContainsKey("models") && payload["models"] is System.Collections.IEnumerable)
+            {
+                foreach (object itemObj in (System.Collections.IEnumerable)payload["models"])
+                {
+                    if (itemObj is Dictionary<string, object>)
+                    {
+                        Dictionary<string, object> mDict = (Dictionary<string, object>)itemObj;
+                        string mName = mDict.ContainsKey("model") ? Convert.ToString(mDict["model"]).Trim() : "";
+                        int weight = 50;
+                        if (mDict.ContainsKey("weight"))
+                        {
+                            int w;
+                            if (int.TryParse(Convert.ToString(mDict["weight"]), out w)) weight = Math.Max(1, w);
+                        }
+                        if (!string.IsNullOrEmpty(mName))
+                        {
+                            catalog.Add(new ModelCatalogItem { ModelName = mName, Weight = weight });
+                        }
+                    }
+                }
+            }
+
+            if (catalog.Count == 0)
+            {
+                if (payload.ContainsKey("model") && payload["model"] != null)
+                {
+                    string m = Convert.ToString(payload["model"]).Trim();
+                    if (!string.IsNullOrEmpty(m)) primaryModel = m;
+                }
+                catalog.Add(new ModelCatalogItem { ModelName = primaryModel, Weight = 100 });
+            }
+            else
+            {
+                primaryModel = catalog[0].ModelName;
+            }
+
+            // Determine spawn center
+            Vector3 centerPos = Vector3.Zero;
+            if (explicitOrigin.HasValue)
+            {
+                centerPos = explicitOrigin.Value;
+            }
+            else
+            {
+                Player player = Game.Player;
+                if (player != null && player.Character != null && player.Character.Exists())
+                {
+                    centerPos = player.Character.Position;
+                }
+                else
+                {
+                    centerPos = new Vector3(_experiment.CenterX, _experiment.CenterY, _experiment.CenterZ);
+                }
+            }
+
+            string groupId = "";
+            if (payload.ContainsKey("group_id") && !string.IsNullOrEmpty(Convert.ToString(payload["group_id"])))
+            {
+                groupId = Convert.ToString(payload["group_id"]).Trim();
+            }
+            else if (payload.ContainsKey("id") && !string.IsNullOrEmpty(Convert.ToString(payload["id"])))
+            {
+                groupId = Convert.ToString(payload["id"]).Trim();
+            }
+            else
+            {
+                groupId = "grp_" + DateTime.UtcNow.Ticks;
+            }
+
+            bool grpVehClean = false;
+            if (payload.ContainsKey("vehicle_cleanup"))
+            {
+                bool.TryParse(Convert.ToString(payload["vehicle_cleanup"]), out grpVehClean);
+            }
+            float grpVehRad = 40.0f;
+            if (payload.ContainsKey("vehicle_cleanup_radius"))
+            {
+                float.TryParse(Convert.ToString(payload["vehicle_cleanup_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out grpVehRad);
+            }
+            grpVehRad = Math.Max(5.0f, Math.Min(300.0f, grpVehRad));
+            string grpVehCenter = payload.ContainsKey("vehicle_cleanup_center") ? Convert.ToString(payload["vehicle_cleanup_center"]).Trim().ToUpperInvariant() : "ORIGIN";
+
+            bool spawnNow = true;
+            if (payload.ContainsKey("spawn")) bool.TryParse(Convert.ToString(payload["spawn"]), out spawnNow);
+            bool restartNow = false;
+            if (payload.ContainsKey("restart")) bool.TryParse(Convert.ToString(payload["restart"]), out restartNow);
+            if (restartNow) spawnNow = true;
+
+            CrowdGroup grp = null;
+            lock (_lock)
+            {
+                if (_groups.ContainsKey(groupId))
+                {
+                    grp = _groups[groupId];
+                    string sigBefore = RouteSignature(grp);
+                    grp.Name = groupName;
+                    grp.PrimaryModel = primaryModel;
+                    grp.Models = catalog;
+                    grp.TargetCount = targetCount;
+                    grp.SpawnRadius = spawnRadius;
+                    grp.MovementRadius = moveRadius;
+                    grp.SpawnRate = spawnRate;
+                    grp.Behavior = behavior;
+                    grp.FollowDistance = followDistance;
+                    grp.DensityAware = densityAware;
+                    grp.DensityLimit = densityLimit;
+                    grp.SpawnCenter = centerPos;
+                    grp.Origin = explicitOrigin;
+                    grp.OriginRadius = originRadius;
+                    grp.Destination = explicitDestination;
+                    grp.DestinationRadius = destRadius;
+                    grp.RouteWaypoints = waypoints;
+                    grp.MoveSpeed = moveSpeed;
+                    grp.ArrivalBehavior = arrivalBehavior;
+                    grp.Color = groupColor;
+                    grp.VehicleCleanup = grpVehClean;
+                    grp.VehicleCleanupRadius = grpVehRad;
+                    grp.VehicleCleanupCenter = grpVehCenter;
+                    grp.DespawnCheckpointEnabled = despawnChkEnabled;
+                    grp.DespawnCheckpoint = despawnCheckpoint;
+                    grp.DespawnRadius = despawnRadius;
+                    grp.ContinuousStream = contStream;
+
+                    if (RouteSignature(grp) != sigBefore) grp.RouteVersion++;
+
+                    int alive = grp.MemberHandles.Count;
+                    if (restartNow)
+                    {
+                        RestartGroupLocked(grp);
+                    }
+                    else if (spawnNow || grp.Status == "ACTIVE" || grp.Status == "SPAWNING")
+                    {
+                        if (targetCount > alive)
+                        {
+                            grp.PendingCount = targetCount - alive;
+                            grp.Status = "SPAWNING";
+                        }
+                        else
+                        {
+                            grp.PendingCount = 0;
+                            grp.Status = "ACTIVE";
+                        }
+                    }
+                    // else: config-only sync of a paused/stopped/configured group - leave state untouched
+                }
+                else
+                {
+                    grp = new CrowdGroup
+                    {
+                        GroupId = groupId,
+                        Name = groupName,
+                        PrimaryModel = primaryModel,
+                        Models = catalog,
+                        TargetCount = targetCount,
+                        SpawnedCount = 0,
+                        FailedCount = 0,
+                        PendingCount = spawnNow ? targetCount : 0,
+                        SpawnRadius = spawnRadius,
+                        MovementRadius = moveRadius,
+                        SpawnRate = spawnRate,
+                        Behavior = behavior,
+                        FollowDistance = followDistance,
+                        DensityAware = densityAware,
+                        DensityLimit = densityLimit,
+                        Status = spawnNow ? "SPAWNING" : "CONFIGURED",
+                        CreatedAt = DateTime.UtcNow,
+                        SpawnCenter = centerPos,
+                        Origin = explicitOrigin,
+                        OriginRadius = originRadius,
+                        Destination = explicitDestination,
+                        DestinationRadius = destRadius,
+                        RouteWaypoints = waypoints,
+                        MoveSpeed = moveSpeed,
+                        ArrivalBehavior = arrivalBehavior,
+                        Color = groupColor,
+                        VehicleCleanup = grpVehClean,
+                        VehicleCleanupRadius = grpVehRad,
+                        VehicleCleanupCenter = grpVehCenter,
+                        DespawnCheckpointEnabled = despawnChkEnabled,
+                        DespawnCheckpoint = despawnCheckpoint,
+                        DespawnRadius = despawnRadius,
+                        ContinuousStream = contStream,
+                        ExitedCount = 0
+                    };
+                    _groups[groupId] = grp;
+                }
+            }
+
+            if (restartNow && grp.VehicleCleanup && grp.Origin.HasValue && _experiment.State == "RUNNING")
+            {
+                PerformSafeVehicleCleanup(grp.Origin.Value.X, grp.Origin.Value.Y, grp.VehicleCleanupRadius);
+            }
+
+            Log(string.Format("SUCCESS: Created/synced group {0} ('{1}') - Target: {2}, Behavior: {3}, Origin: ({4},{5}), Dest: ({6},{7}), Speed: {8}",
+                groupId, groupName, targetCount, behavior,
+                explicitOrigin.HasValue ? Math.Round(explicitOrigin.Value.X, 1).ToString() : "N/A",
+                explicitOrigin.HasValue ? Math.Round(explicitOrigin.Value.Y, 1).ToString() : "N/A",
+                explicitDestination.HasValue ? Math.Round(explicitDestination.Value.X, 1).ToString() : "N/A",
+                explicitDestination.HasValue ? Math.Round(explicitDestination.Value.Y, 1).ToString() : "N/A",
+                moveSpeed));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["group_id"] = groupId;
+            ackData["name"] = groupName;
+            ackData["target_count"] = targetCount;
+            ackData["group_status"] = grp.Status;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessGetGroupsCommand(CommandItem cmd)
+        {
+            List<Dictionary<string, object>> groupList = new List<Dictionary<string, object>>();
+            int totalActivePeds = 0;
+            int totalPendingReservations = 0;
+
+            lock (_lock)
+            {
+                totalActivePeds = _crowdRegistry.Count;
+
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    totalPendingReservations += grp.PendingCount;
+                    groupList.Add(SerializeGroup(grp));
+                }
+            }
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["groups"] = groupList;
+            ackData["total_alive"] = totalActivePeds;
+            ackData["total_pending"] = totalPendingReservations;
+            ackData["total_active_crowd_peds"] = totalActivePeds;
+            ackData["total_pending_reservations"] = totalPendingReservations;
+            ackData["max_total_population"] = MaxTotalPopulation;
+            ackData["max_group_population"] = MaxGroupPopulation;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessGetGroupStatusCommand(CommandItem cmd)
+        {
+            string groupId = (cmd.Payload != null && cmd.Payload.ContainsKey("group_id")) ? Convert.ToString(cmd.Payload["group_id"]).Trim() : "";
+            CrowdGroup grp = null;
+
+            lock (_lock)
+            {
+                if (_groups.ContainsKey(groupId))
+                {
+                    grp = _groups[groupId];
+                }
+            }
+
+            if (grp == null)
+            {
+                SendErrorAck(cmd, string.Format("Group with ID '{0}' not found.", groupId));
+                return;
+            }
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["group"] = SerializeGroup(grp);
+            ackData["group_status"] = grp.Status;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessRemoveGroupCommand(CommandItem cmd)
+        {
+            string groupId = (cmd.Payload != null && cmd.Payload.ContainsKey("group_id")) ? Convert.ToString(cmd.Payload["group_id"]).Trim() : "";
+            CrowdGroup grp = null;
+
+            lock (_lock)
+            {
+                if (_groups.ContainsKey(groupId))
+                {
+                    grp = _groups[groupId];
+                }
+            }
+
+            if (grp == null)
+            {
+                SendErrorAck(cmd, string.Format("Group '{0}' not found for removal.", groupId));
+                return;
+            }
+
+            int clearedCount = 0;
+            lock (_lock)
+            {
+                grp.PendingCount = 0;
+                grp.Status = "REMOVED";
+                ReleaseGroupModels(grp);
+
+                for (int i = 0; i < grp.MemberHandles.Count; i++)
+                {
+                    try
+                    {
+                        Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                        if (p != null && p.Exists())
+                        {
+                            p.Delete();
+                            clearedCount++;
+                        }
+                    }
+                    catch { }
+                }
+
+                _crowdRegistry.RemoveAll(r => r.GroupId == groupId);
+                grp.MemberHandles.Clear();
+                _groups.Remove(groupId);
+            }
+
+            Log(string.Format("INFO: Removed group {0} ('{1}'). Cleared {2} entities.", groupId, grp.Name, clearedCount));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["group_id"] = groupId;
+            ackData["cleared_count"] = clearedCount;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessClearAllGroupsCommand(CommandItem cmd)
+        {
+            int totalCleared = 0;
+            int groupsCleared = 0;
+
+            lock (_lock)
+            {
+                groupsCleared = _groups.Count;
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    grp.PendingCount = 0;
+                    grp.Status = "REMOVED";
+                    ReleaseGroupModels(grp);
+
+                    for (int i = 0; i < grp.MemberHandles.Count; i++)
+                    {
+                        try
+                        {
+                            Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                            if (p != null && p.Exists())
+                            {
+                                p.Delete();
+                                totalCleared++;
+                            }
+                        }
+                        catch { }
+                    }
+                    grp.MemberHandles.Clear();
+                }
+
+                _groups.Clear();
+                _crowdRegistry.Clear();
+                _currentHeatmapCells.Clear();
+            }
+
+            Log(string.Format("INFO: Cleared all groups ({0} groups, {1} entities deleted).", groupsCleared, totalCleared));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["groups_cleared"] = groupsCleared;
+            ackData["cleared_groups_count"] = groupsCleared;
+            ackData["cleared_count"] = totalCleared;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessSetGroupLeaderCommand(CommandItem cmd)
+        {
+            string groupId = (cmd.Payload != null && cmd.Payload.ContainsKey("group_id")) ? Convert.ToString(cmd.Payload["group_id"]).Trim() : "";
+            int leaderHandle = 0;
+            if (cmd.Payload != null && cmd.Payload.ContainsKey("leader_handle"))
+            {
+                int.TryParse(Convert.ToString(cmd.Payload["leader_handle"]), out leaderHandle);
+            }
+
+            CrowdGroup grp = null;
+            lock (_lock)
+            {
+                if (_groups.ContainsKey(groupId)) grp = _groups[groupId];
+            }
+
+            if (grp == null)
+            {
+                SendErrorAck(cmd, string.Format("Group '{0}' not found.", groupId));
+                return;
+            }
+
+            Ped leaderPed = Entity.FromHandle(leaderHandle) as Ped;
+            if (leaderPed == null || !leaderPed.Exists() || leaderPed.IsDead)
+            {
+                SendErrorAck(cmd, string.Format("Ped handle {0} does not exist or is dead.", leaderHandle));
+                return;
+            }
+
+            grp.LeaderHandle = leaderHandle;
+            Log(string.Format("INFO: Group {0} ('{1}') leader set to Ped #{2}", grp.GroupId, grp.Name, leaderHandle));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["group_id"] = groupId;
+            ackData["leader_handle"] = leaderHandle;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessSetExperimentCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> p = cmd.Payload ?? new Dictionary<string, object>();
+
+            lock (_lock)
+            {
+                if (p.ContainsKey("name") && p["name"] != null)
+                {
+                    string nm = Convert.ToString(p["name"]).Trim();
+                    if (!string.IsNullOrEmpty(nm)) _experiment.Name = nm;
+                }
+
+                if (p.ContainsKey("area_type") && p["area_type"] != null)
+                {
+                    string at = Convert.ToString(p["area_type"]).Trim().ToUpperInvariant();
+                    if (at == "CIRCLE" || at == "RECTANGLE") _experiment.AreaType = at;
+                }
+
+                if (p.ContainsKey("center_x"))
+                {
+                    float cx;
+                    if (float.TryParse(Convert.ToString(p["center_x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out cx))
+                        _experiment.CenterX = cx;
+                }
+                if (p.ContainsKey("center_y"))
+                {
+                    float cy;
+                    if (float.TryParse(Convert.ToString(p["center_y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out cy))
+                        _experiment.CenterY = cy;
+                }
+                if (p.ContainsKey("center_z"))
+                {
+                    float cz;
+                    if (float.TryParse(Convert.ToString(p["center_z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out cz))
+                        _experiment.CenterZ = cz;
+                }
+
+                if (p.ContainsKey("width"))
+                {
+                    float w;
+                    if (float.TryParse(Convert.ToString(p["width"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out w))
+                        _experiment.Width = Math.Max(20f, Math.Min(2000f, w));
+                }
+                if (p.ContainsKey("height"))
+                {
+                    float h;
+                    if (float.TryParse(Convert.ToString(p["height"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out h))
+                        _experiment.Height = Math.Max(20f, Math.Min(2000f, h));
+                }
+                if (p.ContainsKey("radius"))
+                {
+                    float r;
+                    if (float.TryParse(Convert.ToString(p["radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out r))
+                        _experiment.Radius = Math.Max(10f, Math.Min(1000f, r));
+                }
+
+                if (p.ContainsKey("vehicle_cleanup"))
+                {
+                    bool vc;
+                    if (bool.TryParse(Convert.ToString(p["vehicle_cleanup"]), out vc))
+                        _experiment.VehicleCleanup = vc;
+                }
+
+                if (p.ContainsKey("grid_resolution"))
+                {
+                    float gr;
+                    if (float.TryParse(Convert.ToString(p["grid_resolution"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out gr))
+                        _experiment.GridResolution = Math.Max(5f, Math.Min(50f, gr));
+                }
+
+                if (p.ContainsKey("allow_outside_routing"))
+                {
+                    bool aor;
+                    if (bool.TryParse(Convert.ToString(p["allow_outside_routing"]), out aor))
+                        _experiment.AllowOutsideRouting = aor;
+                }
+            }
+
+            Log(string.Format("INFO: Experiment '{0}' updated: Type={1}, Center=({2},{3}), Size={4}x{5}, R={6}, VehCleanup={7}, GridRes={8}m",
+                _experiment.Name, _experiment.AreaType, _experiment.CenterX, _experiment.CenterY, _experiment.Width, _experiment.Height, _experiment.Radius, _experiment.VehicleCleanup, _experiment.GridResolution));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment"] = SerializeExperiment();
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessStartExperimentCommand(CommandItem cmd)
+        {
+            bool validateOnly = false;
+            if (cmd.Payload != null && cmd.Payload.ContainsKey("validate_only"))
+            {
+                bool.TryParse(Convert.ToString(cmd.Payload["validate_only"]), out validateOnly);
+            }
+
+            // Validation checks
+            List<string> validationWarnings = new List<string>();
+            List<string> validationErrors = new List<string>();
+
+            lock (_lock)
+            {
+                if (_groups.Count == 0)
+                {
+                    validationWarnings.Add("No pedestrian groups configured in experiment.");
+                }
+
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    if (!_experiment.AllowOutsideRouting)
+                    {
+                        if (grp.Origin.HasValue && !IsInsideExperimentArea(grp.Origin.Value))
+                        {
+                            validationWarnings.Add(string.Format("Group '{0}' origin ({1},{2}) is outside experiment area.", grp.Name, Math.Round(grp.Origin.Value.X, 1), Math.Round(grp.Origin.Value.Y, 1)));
+                        }
+                        if (grp.Destination.HasValue && !IsInsideExperimentArea(grp.Destination.Value))
+                        {
+                            validationWarnings.Add(string.Format("Group '{0}' destination ({1},{2}) is outside experiment area.", grp.Name, Math.Round(grp.Destination.Value.X, 1), Math.Round(grp.Destination.Value.Y, 1)));
+                        }
+                    }
+                }
+            }
+
+            if (validationErrors.Count > 0)
+            {
+                SendErrorAck(cmd, "Validation failed: " + string.Join("; ", validationErrors.ToArray()));
+                return;
+            }
+
+            if (validateOnly)
+            {
+                Dictionary<string, object> valAck = new Dictionary<string, object>();
+                valAck["request_id"] = cmd.RequestId;
+                valAck["command"] = cmd.Command;
+                valAck["status"] = "ACK";
+                valAck["validated"] = true;
+                valAck["warnings"] = validationWarnings;
+                valAck["experiment"] = SerializeExperiment();
+                valAck["game_time"] = Game.GameTime;
+                valAck["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+                EnqueueAck(valAck);
+                return;
+            }
+
+            // Start Experiment execution
+            int vehiclesRemoved = 0;
+            if (_experiment.VehicleCleanup)
+            {
+                vehiclesRemoved = PerformSafeVehicleCleanup();
+            }
+
+            lock (_lock)
+            {
+                _experiment.State = "RUNNING";
+
+                // Resume or start spawning for groups
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    if (grp.Status == "PAUSED" || grp.Status == "STOPPED" || grp.Status == "CONFIGURED" || grp.Status == "COMPLETED" || grp.Status == "ERROR")
+                    {
+                        int alive = grp.MemberHandles.Count;
+                        if (grp.TargetCount > alive)
+                        {
+                            grp.PendingCount = grp.TargetCount - alive;
+                            grp.Status = "SPAWNING";
+                        }
+                        else
+                        {
+                            grp.Status = "ACTIVE";
+                        }
+                    }
+                }
+            }
+
+            Log(string.Format("SUCCESS: Experiment '{0}' STARTED. Running groups: {1}, Ambient vehicles removed: {2}",
+                _experiment.Name, _groups.Count, vehiclesRemoved));
+
+            Notification.PostTicker(string.Format("~g~[CrowdSim]~s~ Experiment '{0}' STARTED", _experiment.Name), false, true);
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment_state"] = _experiment.State;
+            ackData["vehicles_cleaned"] = vehiclesRemoved;
+            ackData["warnings"] = validationWarnings;
+            ackData["experiment"] = SerializeExperiment();
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessPauseExperimentCommand(CommandItem cmd)
+        {
+            lock (_lock)
+            {
+                _experiment.State = "PAUSED";
+            }
+
+            Log(string.Format("INFO: Experiment '{0}' PAUSED.", _experiment.Name));
+            Notification.PostTicker("~y~[CrowdSim]~s~ Experiment PAUSED", false, true);
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment_state"] = _experiment.State;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessResumeExperimentCommand(CommandItem cmd)
+        {
+            lock (_lock)
+            {
+                _experiment.State = "RUNNING";
+            }
+
+            Log(string.Format("INFO: Experiment '{0}' RESUMED.", _experiment.Name));
+            Notification.PostTicker("~g~[CrowdSim]~s~ Experiment RESUMED", false, true);
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment_state"] = _experiment.State;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessStopExperimentCommand(CommandItem cmd)
+        {
+            bool clearPeds = false;
+            if (cmd.Payload != null && cmd.Payload.ContainsKey("clear_peds"))
+            {
+                bool.TryParse(Convert.ToString(cmd.Payload["clear_peds"]), out clearPeds);
+            }
+
+            int pedsCleared = 0;
+            lock (_lock)
+            {
+                _experiment.State = "STOPPED";
+
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    grp.PendingCount = 0;
+                    grp.Status = "STOPPED";
+                    ReleaseGroupModels(grp);
+                }
+
+                if (clearPeds)
+                {
+                    for (int i = 0; i < _crowdRegistry.Count; i++)
+                    {
+                        try
+                        {
+                            Ped p = Entity.FromHandle(_crowdRegistry[i].Handle) as Ped;
+                            if (p != null && p.Exists())
+                            {
+                                p.Delete();
+                                pedsCleared++;
+                            }
+                        }
+                        catch { }
+                    }
+                    _crowdRegistry.Clear();
+                    _currentHeatmapCells.Clear();
+                }
+            }
+
+            Log(string.Format("INFO: Experiment '{0}' STOPPED (PedsCleared: {1}).", _experiment.Name, pedsCleared));
+            Notification.PostTicker("~r~[CrowdSim]~s~ Experiment STOPPED", false, true);
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment_state"] = _experiment.State;
+            ackData["peds_cleared"] = pedsCleared;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessResetExperimentCommand(CommandItem cmd)
+        {
+            int pedsCleared = 0;
+            int groupsCleared = 0;
+
+            lock (_lock)
+            {
+                _experiment.State = "STOPPED";
+                groupsCleared = _groups.Count;
+
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    ReleaseGroupModels(grp);
+                    grp.MemberHandles.Clear();
+                }
+                _groups.Clear();
+
+                for (int i = 0; i < _crowdRegistry.Count; i++)
+                {
+                    try
+                    {
+                        Ped p = Entity.FromHandle(_crowdRegistry[i].Handle) as Ped;
+                        if (p != null && p.Exists())
+                        {
+                            p.Delete();
+                            pedsCleared++;
+                        }
+                    }
+                    catch { }
+                }
+                _crowdRegistry.Clear();
+                _currentHeatmapCells.Clear();
+            }
+
+            Log(string.Format("INFO: Experiment RESET. Groups cleared: {0}, Peds deleted: {1}", groupsCleared, pedsCleared));
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["experiment_state"] = _experiment.State;
+            ackData["groups_cleared"] = groupsCleared;
+            ackData["peds_cleared"] = pedsCleared;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessCleanupVehiclesCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> p = cmd.Payload ?? new Dictionary<string, object>();
+            float? cx = null;
+            float? cy = null;
+            float? rad = null;
+
+            if (p.ContainsKey("center_x") && p["center_x"] != null)
+            {
+                float val;
+                if (float.TryParse(Convert.ToString(p["center_x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out val))
+                    cx = val;
+            }
+            if (p.ContainsKey("center_y") && p["center_y"] != null)
+            {
+                float val;
+                if (float.TryParse(Convert.ToString(p["center_y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out val))
+                    cy = val;
+            }
+            if (p.ContainsKey("radius") && p["radius"] != null)
+            {
+                float val;
+                if (float.TryParse(Convert.ToString(p["radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out val))
+                    rad = Math.Max(5.0f, Math.Min(500.0f, val));
+            }
+
+            int removed = PerformSafeVehicleCleanup(cx, cy, rad);
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["cleared_vehicles_count"] = removed;
+            if (cx.HasValue) ackData["center_x"] = cx.Value;
+            if (cy.HasValue) ackData["center_y"] = cy.Value;
+            if (rad.HasValue) ackData["radius"] = rad.Value;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void ProcessUpdateGroupCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> payload = cmd.Payload ?? new Dictionary<string, object>();
+            string groupId = payload.ContainsKey("group_id") ? Convert.ToString(payload["group_id"]).Trim() : "";
+            if (string.IsNullOrEmpty(groupId) && payload.ContainsKey("id"))
+            {
+                groupId = Convert.ToString(payload["id"]).Trim();
+            }
+
+            if (string.IsNullOrEmpty(groupId))
+            {
+                SendErrorAck(cmd, "Missing 'group_id' in UPDATE_GROUP payload.");
+                return;
+            }
+
+            lock (_lock)
+            {
+                if (!_groups.ContainsKey(groupId))
+                {
+                    SendErrorAck(cmd, string.Format("Group '{0}' not found for update.", groupId));
+                    return;
+                }
+
+                CrowdGroup grp = _groups[groupId];
+                string sigBefore = RouteSignature(grp);
+
+                if (payload.ContainsKey("name") && payload["name"] != null)
+                {
+                    string nm = Convert.ToString(payload["name"]).Trim();
+                    if (!string.IsNullOrEmpty(nm)) grp.Name = nm;
+                }
+
+                if (payload.ContainsKey("color") && payload["color"] != null)
+                {
+                    grp.Color = Convert.ToString(payload["color"]).Trim();
+                }
+
+                if (payload.ContainsKey("count") && payload["count"] != null)
+                {
+                    int c;
+                    if (int.TryParse(Convert.ToString(payload["count"]), out c))
+                    {
+                        int newTarget = Math.Max(1, Math.Min(MaxGroupPopulation, c));
+                        grp.TargetCount = newTarget;
+                        int alive = grp.MemberHandles.Count;
+                        if (newTarget > alive)
+                        {
+                            grp.PendingCount = newTarget - alive;
+                            if (grp.Status != "PAUSED" && grp.Status != "STOPPED")
+                            {
+                                grp.Status = "SPAWNING";
+                            }
+                        }
+                        else
+                        {
+                            grp.PendingCount = 0;
+                            if (grp.Status == "SPAWNING")
+                            {
+                                grp.Status = "ACTIVE";
+                            }
+                        }
+                    }
+                }
+
+                if (payload.ContainsKey("spawn_rate"))
+                {
+                    float sr;
+                    if (float.TryParse(Convert.ToString(payload["spawn_rate"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sr))
+                        grp.SpawnRate = Math.Max(0.5f, Math.Min(100.0f, sr));
+                }
+
+                if (payload.ContainsKey("spawn_radius"))
+                {
+                    float srad;
+                    if (float.TryParse(Convert.ToString(payload["spawn_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out srad))
+                    {
+                        grp.SpawnRadius = Math.Max(2.0f, Math.Min(150.0f, srad));
+                        grp.OriginRadius = grp.SpawnRadius;
+                    }
+                }
+
+                if (payload.ContainsKey("origin") && payload["origin"] is Dictionary<string, object>)
+                {
+                    grp.Origin = ParseVector3Dict((Dictionary<string, object>)payload["origin"]);
+                    if (grp.Origin.HasValue) grp.SpawnCenter = grp.Origin.Value;
+                }
+
+                if (payload.ContainsKey("origin_radius"))
+                {
+                    float orad;
+                    if (float.TryParse(Convert.ToString(payload["origin_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out orad))
+                        grp.OriginRadius = Math.Max(2.0f, Math.Min(100.0f, orad));
+                }
+
+                if (payload.ContainsKey("destination") && payload["destination"] is Dictionary<string, object>)
+                {
+                    grp.Destination = ParseVector3Dict((Dictionary<string, object>)payload["destination"]);
+                }
+
+                if (payload.ContainsKey("destination_radius"))
+                {
+                    float dr;
+                    if (float.TryParse(Convert.ToString(payload["destination_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dr))
+                        grp.DestinationRadius = Math.Max(2.0f, Math.Min(100.0f, dr));
+                }
+
+                string updSpeedKey = payload.ContainsKey("move_speed") ? "move_speed" : "speed";
+                if (payload.ContainsKey(updSpeedKey))
+                {
+                    float spd;
+                    if (float.TryParse(Convert.ToString(payload[updSpeedKey], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out spd))
+                        grp.MoveSpeed = Math.Max(0.5f, Math.Min(4.0f, spd));
+                }
+
+                if (payload.ContainsKey("behavior") && payload["behavior"] != null)
+                {
+                    string b = Convert.ToString(payload["behavior"]).Trim().ToUpperInvariant();
+                    if (!string.IsNullOrEmpty(b)) grp.Behavior = b;
+                }
+
+                if (payload.ContainsKey("arrival_behavior") && payload["arrival_behavior"] != null)
+                {
+                    string ab = Convert.ToString(payload["arrival_behavior"]).Trim().ToUpperInvariant();
+                    if (!string.IsNullOrEmpty(ab)) grp.ArrivalBehavior = ab;
+                }
+
+                if (payload.ContainsKey("density_aware"))
+                {
+                    bool da;
+                    if (bool.TryParse(Convert.ToString(payload["density_aware"]), out da))
+                        grp.DensityAware = da;
+                }
+
+                if (payload.ContainsKey("vehicle_cleanup"))
+                {
+                    bool vc;
+                    if (bool.TryParse(Convert.ToString(payload["vehicle_cleanup"]), out vc))
+                        grp.VehicleCleanup = vc;
+                }
+
+                if (payload.ContainsKey("vehicle_cleanup_radius"))
+                {
+                    float vcr;
+                    if (float.TryParse(Convert.ToString(payload["vehicle_cleanup_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out vcr))
+                        grp.VehicleCleanupRadius = Math.Max(5.0f, Math.Min(300.0f, vcr));
+                }
+
+                if (payload.ContainsKey("vehicle_cleanup_center") && payload["vehicle_cleanup_center"] != null)
+                {
+                    grp.VehicleCleanupCenter = Convert.ToString(payload["vehicle_cleanup_center"]).Trim().ToUpperInvariant();
+                }
+
+                if (payload.ContainsKey("waypoints") && payload["waypoints"] is System.Collections.IEnumerable)
+                {
+                    List<Vector3> wps = new List<Vector3>();
+                    foreach (object wObj in (System.Collections.IEnumerable)payload["waypoints"])
+                    {
+                        if (wObj is Dictionary<string, object>)
+                        {
+                            Vector3? wpVec = ParseVector3Dict((Dictionary<string, object>)wObj);
+                            if (wpVec.HasValue) wps.Add(wpVec.Value);
+                        }
+                    }
+                    grp.RouteWaypoints = wps;
+                }
+
+                if (payload.ContainsKey("status") && payload["status"] != null)
+                {
+                    string st = Convert.ToString(payload["status"]).Trim().ToUpperInvariant();
+                    if (st == "PAUSED" || st == "SPAWNING" || st == "ACTIVE" || st == "DISABLED")
+                    {
+                        grp.Status = st;
+                    }
+                }
+
+                if (RouteSignature(grp) != sigBefore) grp.RouteVersion++;
+
+                Log(string.Format("INFO: Group '{0}' ({1}) updated successfully.", grp.Name, grp.GroupId));
+
+                Dictionary<string, object> ackData = new Dictionary<string, object>();
+                ackData["request_id"] = cmd.RequestId;
+                ackData["command"] = cmd.Command;
+                ackData["status"] = "ACK";
+                ackData["group"] = SerializeGroup(grp);
+                ackData["game_time"] = Game.GameTime;
+                ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+                EnqueueAck(ackData);
+            }
+        }
+
+        private void ProcessStartGroupCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> payload = cmd.Payload ?? new Dictionary<string, object>();
+            string groupId = payload.ContainsKey("group_id") ? Convert.ToString(payload["group_id"]).Trim() : "";
+            if (string.IsNullOrEmpty(groupId) && payload.ContainsKey("id"))
+            {
+                groupId = Convert.ToString(payload["id"]).Trim();
+            }
+
+            bool restart = false;
+            if (payload.ContainsKey("restart")) bool.TryParse(Convert.ToString(payload["restart"]), out restart);
+
+            CrowdGroup cleanupGrp = null;
+            lock (_lock)
+            {
+                if (!_groups.ContainsKey(groupId))
+                {
+                    SendErrorAck(cmd, string.Format("Group '{0}' not found to start.", groupId));
+                    return;
+                }
+
+                CrowdGroup grp = _groups[groupId];
+
+                // A group Spawn must work on its own, without requiring the top-level experiment Start first.
+                if (_experiment.State != "RUNNING")
+                {
+                    _experiment.State = "RUNNING";
+                }
+
+                int alive = grp.MemberHandles.Count;
+                if (restart)
+                {
+                    RestartGroupLocked(grp);
+                    cleanupGrp = grp;
+                }
+                else if (grp.TargetCount > alive)
+                {
+                    grp.PendingCount = grp.TargetCount - alive;
+                    grp.Status = "SPAWNING";
+                }
+                else
+                {
+                    grp.PendingCount = 0;
+                    grp.Status = "ACTIVE";
+                }
+
+                Log(string.Format("INFO: Group '{0}' ({1}) started/resumed (Restart: {2}, Status: {3}, Alive: {4}, Target: {5}, Pending: {6}, HasRoute: {7}).",
+                    grp.Name, grp.GroupId, restart, grp.Status, grp.MemberHandles.Count, grp.TargetCount, grp.PendingCount, HasRoute(grp)));
+
+                Dictionary<string, object> ackData = new Dictionary<string, object>();
+                ackData["request_id"] = cmd.RequestId;
+                ackData["command"] = cmd.Command;
+                ackData["status"] = "ACK";
+                ackData["group"] = SerializeGroup(grp);
+                ackData["game_time"] = Game.GameTime;
+                ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+                EnqueueAck(ackData);
+            }
+
+            if (cleanupGrp != null && cleanupGrp.VehicleCleanup && cleanupGrp.Origin.HasValue)
+            {
+                PerformSafeVehicleCleanup(cleanupGrp.Origin.Value.X, cleanupGrp.Origin.Value.Y, cleanupGrp.VehicleCleanupRadius);
+            }
+        }
+
+        private void ProcessPauseGroupCommand(CommandItem cmd)
+        {
+            Dictionary<string, object> payload = cmd.Payload ?? new Dictionary<string, object>();
+            string groupId = payload.ContainsKey("group_id") ? Convert.ToString(payload["group_id"]).Trim() : "";
+
+            lock (_lock)
+            {
+                if (!_groups.ContainsKey(groupId))
+                {
+                    SendErrorAck(cmd, string.Format("Group '{0}' not found to pause.", groupId));
+                    return;
+                }
+
+                CrowdGroup grp = _groups[groupId];
+                grp.Status = "PAUSED";
+
+                Log(string.Format("INFO: Group '{0}' paused.", grp.Name));
+
+                Dictionary<string, object> ackData = new Dictionary<string, object>();
+                ackData["request_id"] = cmd.RequestId;
+                ackData["command"] = cmd.Command;
+                ackData["status"] = "ACK";
+                ackData["group"] = SerializeGroup(grp);
+                ackData["game_time"] = Game.GameTime;
+                ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+                EnqueueAck(ackData);
+            }
+        }
+
+        private void ProcessGetTelemetryCommand(CommandItem cmd)
+        {
+            Player player = Game.Player;
+            Vector3 playerPos = (player != null && player.Character != null) ? player.Character.Position : Vector3.Zero;
+            float heading = (player != null && player.Character != null) ? player.Character.Heading : 0f;
+
+            Dictionary<string, object> playerDict = new Dictionary<string, object>();
+            playerDict["x"] = Math.Round(playerPos.X, 2);
+            playerDict["y"] = Math.Round(playerPos.Y, 2);
+            playerDict["z"] = Math.Round(playerPos.Z, 2);
+            playerDict["heading"] = Math.Round(heading, 1);
+
+            List<Dictionary<string, object>> groupList = new List<Dictionary<string, object>>();
+            List<Dictionary<string, object>> pedList = new List<Dictionary<string, object>>();
+            List<Dictionary<string, object>> heatmapList = new List<Dictionary<string, object>>();
+
+            lock (_lock)
+            {
+                foreach (CrowdGroup grp in _groups.Values)
+                {
+                    groupList.Add(SerializeGroup(grp));
+                }
+
+                // Sample up to 100 live ped positions for live map dots
+                int sampleCap = Math.Min(100, _crowdRegistry.Count);
+                for (int i = 0; i < sampleCap; i++)
+                {
+                    CrowdPedRecord rec = _crowdRegistry[i];
+                    Ped p = Entity.FromHandle(rec.Handle) as Ped;
+                    if (p != null && p.Exists() && !p.IsDead)
+                    {
+                        Vector3 pp = p.Position;
+                        Dictionary<string, object> pd = new Dictionary<string, object>();
+                        pd["handle"] = rec.Handle;
+                        pd["group_id"] = rec.GroupId;
+                        pd["x"] = Math.Round(pp.X, 2);
+                        pd["y"] = Math.Round(pp.Y, 2);
+                        pd["z"] = Math.Round(pp.Z, 2);
+                        if (_groups.ContainsKey(rec.GroupId)) pd["color"] = _groups[rec.GroupId].Color;
+                        pedList.Add(pd);
+                    }
+                }
+
+                // Heatmap cells
+                for (int i = 0; i < _currentHeatmapCells.Count; i++)
+                {
+                    HeatmapCell c = _currentHeatmapCells[i];
+                    Dictionary<string, object> cd = new Dictionary<string, object>();
+                    cd["col"] = c.Col;
+                    cd["row"] = c.Row;
+                    cd["x"] = c.X;
+                    cd["y"] = c.Y;
+                    cd["count"] = c.Count;
+                    cd["group_counts"] = c.GroupCounts;
+                    heatmapList.Add(cd);
+                }
+            }
+
+            Dictionary<string, object> heatmapDict = new Dictionary<string, object>();
+            heatmapDict["grid_resolution"] = _experiment.GridResolution;
+            heatmapDict["cells"] = heatmapList;
+            heatmapDict["sample_time"] = DateTime.UtcNow.ToString("o");
+
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ACK";
+            ackData["player"] = playerDict;
+            ackData["experiment"] = SerializeExperiment();
+            ackData["groups"] = groupList;
+            ackData["heatmap"] = heatmapDict;
+            ackData["pedestrians"] = pedList;
+            ackData["total_managed_peds"] = _crowdRegistry.Count;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        #endregion
+
+        #region Spawning State Machine & Global Scheduler
+
+        private void TickSpawningGroups()
+        {
+            List<CrowdGroup> spawningGroups = new List<CrowdGroup>();
+            foreach (CrowdGroup g in _groups.Values)
+            {
+                if (g.Status == "SPAWNING")
+                {
+                    spawningGroups.Add(g);
+                }
+            }
+
+            if (spawningGroups.Count == 0) return;
+
+            int spawnsRemainingBudget = GlobalSpawnBudgetPerTick;
+            int totalGroups = spawningGroups.Count;
+
+            for (int step = 0; step < totalGroups && spawnsRemainingBudget > 0; step++)
+            {
+                int groupIdx = (_spawningRoundRobinIndex + step) % totalGroups;
+                CrowdGroup grp = spawningGroups[groupIdx];
+
+                if (grp.PendingCount <= 0) continue;
+
+                // Rate limiting check
+                double spawnIntervalSec = 1.0 / Math.Max(1.0, grp.SpawnRate);
+                if ((DateTime.UtcNow - grp.LastSpawnTime).TotalSeconds < spawnIntervalSec)
+                {
+                    continue;
+                }
+
+                // Global population & engine concurrent safety check:
+                // Allows scaling up to MaxTotalPopulation when running with an expanded engine ped pool.
+                int currentTotal;
+                lock (_lock) { currentTotal = _crowdRegistry.Count; }
+                if (currentTotal >= MaxTotalPopulation)
+                {
+                    grp.LastSpawnTime = DateTime.UtcNow.AddSeconds(1.0);
+                    break;
+                }
+
+                // Stage 3C Asynchronous Streaming State Machine
+                string chosenModel = PickModelFromCatalog(grp.Models, grp.PrimaryModel);
+
+                if (!grp.ModelPool.ContainsKey(chosenModel))
+                {
+                    grp.ModelPool[chosenModel] = new Model(chosenModel);
+                    grp.ModelRequestedPool[chosenModel] = false;
+                    grp.ModelLoadedPool[chosenModel] = false;
+                    grp.ModelRequestStartPool[chosenModel] = DateTime.MinValue;
+                }
+
+                Model m = grp.ModelPool[chosenModel];
+
+                if (!m.IsValid)
+                {
+                    Log(string.Format("WARN: Model '{0}' in group {1} is invalid. Marking ped failed.", chosenModel, grp.GroupId));
+                    grp.FailedCount++;
+                    grp.PendingCount--;
+                    continue;
+                }
+
+                if (!grp.ModelLoadedPool[chosenModel])
+                {
+                    if (!grp.ModelRequestedPool[chosenModel])
+                    {
+                        m.Request();
+                        grp.ModelRequestedPool[chosenModel] = true;
+                        grp.ModelRequestStartPool[chosenModel] = DateTime.UtcNow;
+                        continue;
+                    }
+                    else
+                    {
+                        if (m.IsLoaded)
+                        {
+                            grp.ModelLoadedPool[chosenModel] = true;
+                        }
+                        else
+                        {
+                            if ((DateTime.UtcNow - grp.ModelRequestStartPool[chosenModel]).TotalMilliseconds > 1500)
+                            {
+                                Log(string.Format("WARN: Model '{0}' request timed out after 1500ms for group {1}.", chosenModel, grp.GroupId));
+                                grp.FailedCount++;
+                                grp.PendingCount--;
+                                grp.ModelRequestedPool[chosenModel] = false;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // Compute candidate spawn position
+                Vector3 candidatePos = Vector3.Zero;
+                float heading = (float)(_rng.NextDouble() * 360.0);
+
+                if (grp.Origin.HasValue)
+                {
+                    Vector3 baseOrig = grp.Origin.Value;
+                    float angle = (float)(_rng.NextDouble() * 2 * Math.PI);
+                    float r = (float)(Math.Sqrt(_rng.NextDouble()) * grp.OriginRadius);
+                    candidatePos = new Vector3(baseOrig.X + (float)Math.Cos(angle) * r, baseOrig.Y + (float)Math.Sin(angle) * r, baseOrig.Z);
+                }
+                else
+                {
+                    float angle = (float)(_rng.NextDouble() * 2 * Math.PI);
+                    float r = (float)(Math.Sqrt(_rng.NextDouble()) * grp.SpawnRadius);
+                    candidatePos = new Vector3(grp.SpawnCenter.X + (float)Math.Cos(angle) * r, grp.SpawnCenter.Y + (float)Math.Sin(angle) * r, grp.SpawnCenter.Z);
+                }
+
+                // Resolve ground-level Z coordinate
+                float groundZ = 0f;
+                if (World.GetGroundHeight(new Vector3(candidatePos.X, candidatePos.Y, 1000.0f), out groundZ))
+                {
+                    candidatePos.Z = groundZ;
+                }
+                else if (World.GetGroundHeight(new Vector3(candidatePos.X, candidatePos.Y, 100.0f), out groundZ))
+                {
+                    candidatePos.Z = groundZ;
+                }
+                else if (Math.Abs(candidatePos.Z) < 0.5f && Game.Player != null && Game.Player.Character != null && Game.Player.Character.Exists())
+                {
+                    candidatePos.Z = Game.Player.Character.Position.Z;
+                }
+
+                Vector3 safePos;
+                if (World.GetSafePositionForPed(candidatePos, out safePos))
+                {
+                    if ((safePos - candidatePos).Length() < 20.0f)
+                    {
+                        candidatePos = safePos;
+                    }
+                }
+
+                // Optional Density-Aware check
+                if (grp.DensityAware)
+                {
+                    int nearby = 0;
+                    lock (_lock)
+                    {
+                        for (int k = 0; k < _crowdRegistry.Count; k++)
+                        {
+                            Ped cp = Entity.FromHandle(_crowdRegistry[k].Handle) as Ped;
+                            if (cp != null && cp.Exists() && (cp.Position - candidatePos).Length() < 5.0f)
+                            {
+                                nearby++;
+                            }
+                        }
+                    }
+                    float localDensity = nearby / 78.5f;
+                    if (localDensity > grp.DensityLimit)
+                    {
+                        continue;
+                    }
+                }
+
+                Ped spawnedPed = null;
+                string spawnFailureReason = "";
+                try
+                {
+                    spawnedPed = Ped.Create(m, candidatePos, heading);
+                }
+                catch (Exception ex)
+                {
+                    spawnFailureReason = ex.Message;
+                    Log(string.Format("WARN: Ped.Create threw exception for group {0}: {1}", grp.GroupId, ex.Message));
+                }
+
+                grp.LastSpawnTime = DateTime.UtcNow;
+                spawnsRemainingBudget--;
+
+                if (spawnedPed != null && spawnedPed.Exists())
+                {
+                    int handle = spawnedPed.Handle;
+                    spawnedPed.IsPersistent = true;
+                    spawnedPed.BlockPermanentEvents = true;
+
+                    Vector3 dispersedDest = ComputeDispersedDestination(grp);
+
+                    CrowdPedRecord rec = new CrowdPedRecord
+                    {
+                        Handle = handle,
+                        ModelName = chosenModel,
+                        CreatedAt = DateTime.UtcNow,
+                        GroupId = grp.GroupId,
+                        CurrentWaypointIndex = 0,
+                        IsReverseRoute = false,
+                        HasReachedDestination = false,
+                        DispersedDestination = dispersedDest,
+                        DispersedOrigin = candidatePos,
+                        LastTaskAssignTime = DateTime.UtcNow,
+                        RouteVersion = grp.RouteVersion
+                    };
+
+                    lock (_lock)
+                    {
+                        _crowdRegistry.Add(rec);
+                        grp.MemberHandles.Add(handle);
+                        grp.SpawnedCount++;
+                        grp.PendingCount--;
+                    }
+
+                    Log(string.Format("SUCCESS: [SPAWN] Ped handle {0} (model: {1}) created for group {2} ('{3}') at ({4},{5},{6}) heading {7}. Alive: {8}, Target: {9}, Pending: {10}",
+                        handle, chosenModel, grp.GroupId, grp.Name,
+                        Math.Round(candidatePos.X, 1), Math.Round(candidatePos.Y, 1), Math.Round(candidatePos.Z, 1),
+                        Math.Round(heading, 1), grp.MemberHandles.Count, grp.TargetCount, grp.PendingCount));
+
+                    // Assign initial behavior task
+                    AssignInitialBehaviorTask(grp, spawnedPed, candidatePos, rec);
+                }
+                else
+                {
+                    // If the native engine pool is saturated (null returned), throttle gracefully without burning pending queue or spamming memory
+                    if (string.IsNullOrEmpty(spawnFailureReason))
+                    {
+                        grp.LastSpawnTime = DateTime.UtcNow.AddSeconds(3.0);
+                        grp.Status = "ACTIVE";
+                        Log(string.Format("INFO: [MAX_CAPACITY] Native engine ped pool saturated at {0} active peds. Spawning throttled for 3s to protect engine memory; holding {1} pending peds for open slots.", grp.MemberHandles.Count, grp.PendingCount));
+                        break; // Stop trying to spawn in this frame
+                    }
+                    else
+                    {
+                        grp.FailedCount++;
+                        grp.PendingCount--;
+                        Log(string.Format("ERROR: [SPAWN_FAIL] Ped creation failed for group {0} ('{1}') model '{2}' at ({3},{4},{5}). Reason: {6}. Failed: {7}, Pending: {8}",
+                            grp.GroupId, grp.Name, chosenModel,
+                            Math.Round(candidatePos.X, 1), Math.Round(candidatePos.Y, 1), Math.Round(candidatePos.Z, 1),
+                            spawnFailureReason,
+                            grp.FailedCount, grp.PendingCount));
+                    }
+                }
+
+                // Check group completion after spawn
+                if (grp.PendingCount <= 0)
+                {
+                    grp.Status = (grp.MemberHandles.Count > 0) ? "ACTIVE" : (grp.SpawnedCount > 0 ? "COMPLETED" : "ERROR");
+                    ReleaseGroupModels(grp);
+                    Log(string.Format("INFO: Group {0} ('{1}') finished spawning. Spawned: {2}, Alive: {3}, Failed: {4}, Status: {5}",
+                        grp.GroupId, grp.Name, grp.SpawnedCount, grp.MemberHandles.Count, grp.FailedCount, grp.Status));
+                    Notification.PostTicker(string.Format("~g~[CrowdSim]~s~ Group '{0}' is now {1} ({2} alive)", grp.Name, grp.Status, grp.MemberHandles.Count), false, true);
+                }
+            }
+
+            _spawningRoundRobinIndex = (_spawningRoundRobinIndex + 1) % totalGroups;
+        }
+
+        private static float Dist2D(Vector3 a, Vector3 b)
+        {
+            float dx = a.X - b.X;
+            float dy = a.Y - b.Y;
+            return (float)Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        private static bool HasRoute(CrowdGroup grp)
+        {
+            return grp.Destination.HasValue || (grp.RouteWaypoints != null && grp.RouteWaypoints.Count > 0);
+        }
+
+        // The dashboard only sends X/Y for route points, so Z must be resolved from the world
+        // (otherwise nav targets sit ~30m underground and peds never arrive).
+        private Vector3 ResolveNavTarget(Vector3 target, Vector3 refPos)
+        {
+            float gz;
+            if (World.GetGroundHeight(new Vector3(target.X, target.Y, refPos.Z + 30.0f), out gz) && Math.Abs(gz - refPos.Z) < 60.0f)
+            {
+                return new Vector3(target.X, target.Y, gz);
+            }
+            return new Vector3(target.X, target.Y, refPos.Z);
+        }
+
+        private Vector3 ComputeDispersedPoint(Vector3 center, float radius)
+        {
+            float dAngle = (float)(_rng.NextDouble() * 2 * Math.PI);
+            float dR = (float)(Math.Sqrt(_rng.NextDouble()) * Math.Max(1.0f, radius));
+            return new Vector3(
+                center.X + (float)Math.Cos(dAngle) * dR,
+                center.Y + (float)Math.Sin(dAngle) * dR,
+                center.Z);
+        }
+
+        private Vector3 ComputeDispersedDestination(CrowdGroup grp)
+        {
+            if (grp.Destination.HasValue)
+            {
+                return ComputeDispersedPoint(grp.Destination.Value, grp.DestinationRadius);
+            }
+            if (grp.RouteWaypoints != null && grp.RouteWaypoints.Count > 0)
+            {
+                return grp.RouteWaypoints[grp.RouteWaypoints.Count - 1];
+            }
+            return Vector3.Zero;
+        }
+
+        private static string RouteSignature(CrowdGroup grp)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            if (grp.Origin.HasValue) sb.AppendFormat(CultureInfo.InvariantCulture, "O{0:F1},{1:F1};", grp.Origin.Value.X, grp.Origin.Value.Y);
+            if (grp.Destination.HasValue) sb.AppendFormat(CultureInfo.InvariantCulture, "D{0:F1},{1:F1};", grp.Destination.Value.X, grp.Destination.Value.Y);
+            sb.AppendFormat(CultureInfo.InvariantCulture, "r{0:F1},{1:F1},{2:F1};s{3:F2};{4};{5};", grp.OriginRadius, grp.DestinationRadius, grp.SpawnRadius, grp.MoveSpeed, grp.Behavior, grp.ArrivalBehavior);
+            if (grp.RouteWaypoints != null)
+            {
+                for (int i = 0; i < grp.RouteWaypoints.Count; i++)
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "W{0:F1},{1:F1};", grp.RouteWaypoints[i].X, grp.RouteWaypoints[i].Y);
+            }
+            if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                sb.AppendFormat(CultureInfo.InvariantCulture, "DSP{0:F1},{1:F1},{2:F1};", grp.DespawnCheckpoint.Value.X, grp.DespawnCheckpoint.Value.Y, grp.DespawnRadius);
+            return sb.ToString();
+        }
+
+        // Must be called while holding _lock. Removes the group's peds and re-queues the full target.
+        private void RestartGroupLocked(CrowdGroup grp)
+        {
+            int removed = 0;
+            for (int i = 0; i < grp.MemberHandles.Count; i++)
+            {
+                try
+                {
+                    Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                    if (p != null && p.Exists())
+                    {
+                        p.IsPersistent = false;
+                        p.Delete();
+                        removed++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("WARN: RestartGroup failed deleting ped {0}: {1}", grp.MemberHandles[i], ex.Message));
+                }
+            }
+            string gid = grp.GroupId;
+            _crowdRegistry.RemoveAll(delegate (CrowdPedRecord r) { return r.GroupId == gid; });
+            grp.MemberHandles.Clear();
+            grp.SpawnedCount = 0;
+            grp.FailedCount = 0;
+            grp.PendingCount = grp.TargetCount;
+            grp.Status = "SPAWNING";
+            grp.LastSpawnTime = DateTime.MinValue;
+            ReleaseGroupModels(grp);
+            Log(string.Format("INFO: Group '{0}' ({1}) restarted: removed {2} peds, respawning {3}.", grp.Name, grp.GroupId, removed, grp.TargetCount));
+        }
+
+        private void AssignInitialBehaviorTask(CrowdGroup grp, Ped ped, Vector3 spawnPos, CrowdPedRecord rec)
+        {
+            try
+            {
+                if (HasRoute(grp))
+                {
+                    Vector3 target = (grp.RouteWaypoints != null && grp.RouteWaypoints.Count > 0) ? grp.RouteWaypoints[0] : rec.DispersedDestination;
+                    target = ResolveNavTarget(target, spawnPos);
+                    ped.Task.FollowNavMeshTo(target, (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                    Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, ped.Handle, grp.MoveSpeed);
+                    return;
+                }
+
+                if (grp.Behavior == "ROUTE_TRAVEL")
+                {
+                    // Route behavior selected but no destination/waypoints yet: idle-wander instead of walking to (0,0,0)
+                    ped.Task.WanderAround(spawnPos, 25.0f);
+                    return;
+                }
+
+                switch (grp.Behavior)
+                {
+                    case "COHESIVE_WANDER":
+                        ped.Task.WanderAround(grp.SpawnCenter, grp.MovementRadius);
+                        break;
+
+                    case "STATIONARY_GATHERING":
+                        ped.Task.WanderAround(spawnPos, 4.0f);
+                        break;
+
+                    case "FOLLOW_LEADER":
+                        if (grp.LeaderHandle != 0 && grp.LeaderHandle != ped.Handle)
+                        {
+                            Ped leader = Entity.FromHandle(grp.LeaderHandle) as Ped;
+                            if (leader != null && leader.Exists())
+                            {
+                                ped.Task.GoTo(leader, Vector3.Zero, -1);
+                            }
+                            else
+                            {
+                                ped.Task.WanderAround(grp.SpawnCenter, grp.MovementRadius);
+                            }
+                        }
+                        else
+                        {
+                            ped.Task.WanderAround(grp.SpawnCenter, grp.MovementRadius);
+                        }
+                        break;
+
+                    case "FOLLOW_PLAYER":
+                        Player p = Game.Player;
+                        if (p != null && p.Character != null && p.Character.Exists())
+                        {
+                            ped.Task.FollowNavMeshTo(p.Character.Position);
+                        }
+                        else
+                        {
+                            ped.Task.WanderAround(grp.SpawnCenter, grp.MovementRadius);
+                        }
+                        break;
+
+                    case "PATROL":
+                        if (grp.PatrolWaypoints != null && grp.PatrolWaypoints.Count > 0)
+                        {
+                            ped.Task.FollowNavMeshTo(grp.PatrolWaypoints[0]);
+                        }
+                        else
+                        {
+                            ped.Task.WanderAround(grp.SpawnCenter, grp.MovementRadius);
+                        }
+                        break;
+
+                    case "INDEPENDENT_WANDER":
+                    default:
+                        ped.Task.WanderAround(spawnPos, grp.MovementRadius);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("WARN: AssignInitialBehaviorTask threw on ped {0}: {1}", ped.Handle, ex.Message));
+            }
+        }
+
+        #endregion
+
+        #region Behavior Controllers
+
+        private void TickGroupBehaviors()
+        {
+            foreach (CrowdGroup grp in _groups.Values)
+            {
+                bool groupPaused = (grp.Status == "PAUSED");
+                if (grp.Status != "ACTIVE" && grp.Status != "SPAWNING" && !groupPaused) continue;
+
+                // Throttled behavior updates: once every 1.5s per group
+                if ((DateTime.UtcNow - grp.LastBehaviorUpdate).TotalSeconds < 1.5) continue;
+                grp.LastBehaviorUpdate = DateTime.UtcNow;
+
+                List<Ped> aliveMembers = new List<Ped>();
+                for (int i = 0; i < grp.MemberHandles.Count; i++)
+                {
+                    Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                    if (p != null && p.Exists() && !p.IsDead)
+                    {
+                        aliveMembers.Add(p);
+                    }
+                }
+
+                if (aliveMembers.Count == 0) continue;
+
+                // Handle Paused Experiment state
+                if (_experiment.State == "PAUSED" || groupPaused)
+                {
+                    foreach (Ped p in aliveMembers)
+                    {
+                        p.Task.StandStill(2000);
+                    }
+                    continue;
+                }
+
+                // Stage 4 Destination & Route Travel Behavior
+                if (HasRoute(grp))
+                {
+                    UpdateRouteTravelBehavior(grp, aliveMembers);
+                    continue;
+                }
+
+                switch (grp.Behavior)
+                {
+                    case "FOLLOW_LEADER":
+                        UpdateFollowLeaderBehavior(grp, aliveMembers);
+                        break;
+
+                    case "FOLLOW_PLAYER":
+                        UpdateFollowPlayerBehavior(grp, aliveMembers);
+                        break;
+
+                    case "COHESIVE_WANDER":
+                        UpdateCohesiveWanderBehavior(grp, aliveMembers);
+                        break;
+
+                    case "PATROL":
+                        UpdatePatrolBehavior(grp, aliveMembers);
+                        break;
+
+                    case "STATIONARY_GATHERING":
+                        UpdateStationaryGatheringBehavior(grp, aliveMembers);
+                        break;
+
+                    case "INDEPENDENT_WANDER":
+                    default:
+                        UpdateIndependentWanderBehavior(grp, aliveMembers);
+                        break;
+                }
+            }
+        }
+
+        private void UpdateRouteTravelBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            bool hasDest = grp.Destination.HasValue;
+            bool hasWps = grp.RouteWaypoints != null && grp.RouteWaypoints.Count > 0;
+            if (!hasDest && !hasWps) return;
+
+            Vector3 dest = hasDest ? grp.Destination.Value : grp.RouteWaypoints[grp.RouteWaypoints.Count - 1];
+            float arriveRadius = hasDest ? grp.DestinationRadius : 4.0f;
+            if (arriveRadius < 2.0f) arriveRadius = 2.0f;
+
+            bool isLooping = (grp.ArrivalBehavior == "LOOP_ROUTE" ||
+                              grp.ArrivalBehavior == "NEXT_WAYPOINT" ||
+                              grp.ArrivalBehavior == "LOOP" ||
+                              grp.ArrivalBehavior == "PING_PONG" ||
+                              grp.ArrivalBehavior == "CYCLE");
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                CrowdPedRecord rec = FindPedRecord(p.Handle);
+                if (rec == null) continue;
+
+                Vector3 pedPos = p.Position;
+
+                // Route was edited after this ped spawned: re-initialise its personal route state
+                if (rec.RouteVersion != grp.RouteVersion)
+                {
+                    rec.RouteVersion = grp.RouteVersion;
+                    rec.DispersedDestination = ComputeDispersedDestination(grp);
+                    rec.CurrentWaypointIndex = 0;
+                    rec.IsReverseRoute = false;
+                    rec.HasReachedDestination = false;
+                    rec.LastTaskAssignTime = DateTime.MinValue;
+                }
+
+                // If heading to final separate despawn checkpoint
+                if (rec.HeadingToDespawn)
+                {
+                    if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                    {
+                        Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                        float dspRad = Math.Max(3.0f, grp.DespawnRadius);
+                        if (Dist2D(pedPos, dspTarget) <= dspRad)
+                        {
+                            p.IsPersistent = false;
+                            p.Delete();
+                            lock (_lock)
+                            {
+                                _crowdRegistry.Remove(rec);
+                                grp.MemberHandles.Remove(p.Handle);
+                                grp.ExitedCount++;
+                                if (grp.ContinuousStream && grp.Status != "PAUSED" && grp.Status != "STOPPED")
+                                {
+                                    int alive = grp.MemberHandles.Count;
+                                    if (alive < grp.TargetCount)
+                                    {
+                                        grp.PendingCount = grp.TargetCount - alive;
+                                        grp.Status = "SPAWNING";
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Only retask if unassigned or stuck
+                        if (rec.LastTaskAssignTime == DateTime.MinValue ||
+                            (p.Velocity.Length() < 0.15f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 3.0))
+                        {
+                            rec.LastTaskAssignTime = DateTime.UtcNow;
+                            p.Task.FollowNavMeshTo(ResolveNavTarget(dspTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                            Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                        }
+                        continue;
+                    }
+                    else
+                    {
+                        rec.HeadingToDespawn = false;
+                        if (isLooping) rec.IsReverseRoute = true;
+                        else rec.HasReachedDestination = true;
+                    }
+                }
+
+                // If ped has reached its permanent destination (STOP, WANDER, GATHER)
+                if (rec.HasReachedDestination)
+                {
+                    if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                    {
+                        rec.HasReachedDestination = false;
+                        rec.HeadingToDespawn = true;
+                        rec.LastTaskAssignTime = DateTime.UtcNow;
+                        Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                        p.Task.FollowNavMeshTo(ResolveNavTarget(dspTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                        Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                        continue;
+                    }
+                    if ((DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 10.0)
+                    {
+                        rec.LastTaskAssignTime = DateTime.UtcNow;
+                        if (grp.ArrivalBehavior == "STOP")
+                        {
+                            p.Task.StandStill(12000);
+                        }
+                        else if (grp.ArrivalBehavior == "WANDER")
+                        {
+                            p.Task.WanderAround(ResolveNavTarget(dest, pedPos), arriveRadius);
+                        }
+                        else if (grp.ArrivalBehavior == "GATHER")
+                        {
+                            p.Task.WanderAround(ResolveNavTarget(rec.DispersedDestination, pedPos), 3.0f);
+                        }
+                    }
+                    continue;
+                }
+
+                // -------------------------------------------------------------
+                // FORWARD TRAVERSAL (Towards Destination)
+                // -------------------------------------------------------------
+                if (!rec.IsReverseRoute)
+                {
+                    // Advance through intermediate waypoints
+                    if (hasWps && rec.CurrentWaypointIndex < grp.RouteWaypoints.Count)
+                    {
+                        Vector3 wp = grp.RouteWaypoints[rec.CurrentWaypointIndex];
+                        if (Dist2D(pedPos, wp) <= 3.5f)
+                        {
+                            rec.CurrentWaypointIndex++;
+                            rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately to next waypoint
+                        }
+                    }
+
+                    Vector3 currentTarget;
+                    bool isAtFinalDestNode = !hasWps || rec.CurrentWaypointIndex >= grp.RouteWaypoints.Count;
+
+                    if (!isAtFinalDestNode)
+                    {
+                        currentTarget = grp.RouteWaypoints[rec.CurrentWaypointIndex];
+                    }
+                    else
+                    {
+                        currentTarget = hasDest ? rec.DispersedDestination : dest;
+
+                        // Check if ped reached final destination
+                        if (Dist2D(pedPos, dest) <= arriveRadius || (hasDest && Dist2D(pedPos, rec.DispersedDestination) <= 3.5f))
+                        {
+                            if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                            {
+                                rec.HeadingToDespawn = true;
+                                rec.LastTaskAssignTime = DateTime.UtcNow;
+                                Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                                p.Task.FollowNavMeshTo(ResolveNavTarget(dspTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                                Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                                continue;
+                            }
+                            else if (grp.ArrivalBehavior == "DESPAWN" || grp.ArrivalBehavior == "DESPAWN_AT_DEST")
+                            {
+                                p.IsPersistent = false;
+                                p.Delete();
+                                lock (_lock)
+                                {
+                                    _crowdRegistry.Remove(rec);
+                                    grp.MemberHandles.Remove(p.Handle);
+                                    grp.ExitedCount++;
+                                    if (grp.ContinuousStream && grp.Status != "PAUSED" && grp.Status != "STOPPED")
+                                    {
+                                        int alive = grp.MemberHandles.Count;
+                                        if (alive < grp.TargetCount)
+                                        {
+                                            grp.PendingCount = grp.TargetCount - alive;
+                                            grp.Status = "SPAWNING";
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            else if (isLooping)
+                            {
+                                // Reverse route: start heading back towards Origin!
+                                rec.IsReverseRoute = true;
+                                rec.HasReachedDestination = false;
+                                rec.CurrentWaypointIndex = hasWps ? grp.RouteWaypoints.Count - 1 : -1;
+                                rec.DispersedOrigin = grp.Origin.HasValue
+                                    ? ComputeDispersedPoint(grp.Origin.Value, grp.OriginRadius)
+                                    : pedPos;
+                                rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately
+                                currentTarget = (hasWps && rec.CurrentWaypointIndex >= 0)
+                                    ? grp.RouteWaypoints[rec.CurrentWaypointIndex]
+                                    : rec.DispersedOrigin;
+                            }
+                            else
+                            {
+                                // Terminal arrival (STOP, WANDER, GATHER)
+                                rec.HasReachedDestination = true;
+                                rec.LastTaskAssignTime = DateTime.UtcNow;
+                                if (grp.ArrivalBehavior == "STOP") p.Task.StandStill(10000);
+                                else if (grp.ArrivalBehavior == "WANDER") p.Task.WanderAround(ResolveNavTarget(dest, pedPos), arriveRadius);
+                                else if (grp.ArrivalBehavior == "GATHER") p.Task.WanderAround(ResolveNavTarget(rec.DispersedDestination, pedPos), 3.0f);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Task ped to continue towards currentTarget only when unassigned, waypoint changed, or stuck
+                    bool needsRetask = (rec.LastTaskAssignTime == DateTime.MinValue) ||
+                                       (p.Velocity.Length() < 0.15f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 6.0);
+                    if (needsRetask)
+                    {
+                        rec.LastTaskAssignTime = DateTime.UtcNow;
+                        p.Task.FollowNavMeshTo(ResolveNavTarget(currentTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                        Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                    }
+                }
+                // -------------------------------------------------------------
+                // REVERSE TRAVERSAL (Towards Origin in Loop Mode)
+                // -------------------------------------------------------------
+                else
+                {
+                    // Check if reaching intermediate waypoint in reverse
+                    if (hasWps && rec.CurrentWaypointIndex >= 0)
+                    {
+                        Vector3 wp = grp.RouteWaypoints[rec.CurrentWaypointIndex];
+                        if (Dist2D(pedPos, wp) <= 3.5f)
+                        {
+                            rec.CurrentWaypointIndex--;
+                            rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately
+                        }
+                    }
+
+                    Vector3 currentTarget;
+                    bool isAtOriginNode = !hasWps || rec.CurrentWaypointIndex < 0;
+
+                    if (!isAtOriginNode)
+                    {
+                        currentTarget = grp.RouteWaypoints[rec.CurrentWaypointIndex];
+                    }
+                    else
+                    {
+                        Vector3 originPos = grp.Origin.HasValue ? grp.Origin.Value : (hasWps ? grp.RouteWaypoints[0] : dest);
+                        float originRad = grp.OriginRadius > 0 ? grp.OriginRadius : 4.0f;
+                        currentTarget = rec.DispersedOrigin;
+
+                        // Check if ped reached Origin
+                        if (Dist2D(pedPos, originPos) <= originRad || Dist2D(pedPos, rec.DispersedOrigin) <= 3.5f)
+                        {
+                            // Reached Origin! Turn around and head forward towards Destination again!
+                            rec.IsReverseRoute = false;
+                            rec.HasReachedDestination = false;
+                            rec.CurrentWaypointIndex = 0;
+                            rec.DispersedDestination = ComputeDispersedDestination(grp);
+                            rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately
+                            currentTarget = hasWps ? grp.RouteWaypoints[0] : rec.DispersedDestination;
+                        }
+                    }
+
+                    // Task ped to continue towards currentTarget only when unassigned, waypoint changed, or stuck
+                    bool needsRetask = (rec.LastTaskAssignTime == DateTime.MinValue) ||
+                                       (p.Velocity.Length() < 0.15f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 6.0);
+                    if (needsRetask)
+                    {
+                        rec.LastTaskAssignTime = DateTime.UtcNow;
+                        p.Task.FollowNavMeshTo(ResolveNavTarget(currentTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
+                        Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                    }
+                }
+            }
+        }
+
+        private void UpdateFollowLeaderBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            Ped leader = null;
+            if (grp.LeaderHandle != 0)
+            {
+                leader = Entity.FromHandle(grp.LeaderHandle) as Ped;
+            }
+
+            if (leader == null || !leader.Exists() || leader.IsDead)
+            {
+                leader = ElectNewLeader(grp);
+            }
+
+            if (leader == null) return;
+
+            Vector3 leaderPos = leader.Position;
+            float followDist = grp.FollowDistance;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                if (p.Handle == leader.Handle)
+                {
+                    if ((p.Position - grp.SpawnCenter).Length() > grp.MovementRadius)
+                    {
+                        p.Task.FollowNavMeshTo(grp.SpawnCenter);
+                    }
+                    continue;
+                }
+
+                float dist = (p.Position - leaderPos).Length();
+                if (dist > followDist * 3.0f)
+                {
+                    p.Task.FollowNavMeshTo(leaderPos);
+                }
+                else if (dist > followDist * 1.5f)
+                {
+                    p.Task.GoTo(leader, Vector3.Zero, -1);
+                }
+            }
+        }
+
+        private void UpdateFollowPlayerBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            Player player = Game.Player;
+            if (player == null || player.Character == null || !player.Character.Exists()) return;
+
+            Vector3 playerPos = player.Character.Position;
+            float followDist = grp.FollowDistance;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                float dist = (p.Position - playerPos).Length();
+                if (dist > followDist * 2.5f)
+                {
+                    p.Task.FollowNavMeshTo(playerPos);
+                }
+                else if (dist > followDist)
+                {
+                    p.Task.GoTo(player.Character, Vector3.Zero, -1);
+                }
+            }
+        }
+
+        private void UpdateCohesiveWanderBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            Vector3 center = grp.SpawnCenter;
+            float radius = grp.MovementRadius;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                if ((p.Position - center).Length() > radius)
+                {
+                    p.Task.FollowNavMeshTo(center);
+                }
+            }
+        }
+
+        private void UpdateStationaryGatheringBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            Vector3 center = grp.SpawnCenter;
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                if ((p.Position - center).Length() > 6.0f)
+                {
+                    p.Task.FollowNavMeshTo(center);
+                }
+            }
+        }
+
+        private void UpdatePatrolBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            if (grp.PatrolWaypoints == null || grp.PatrolWaypoints.Count == 0) return;
+
+            int wpIndex = grp.CurrentPatrolIndex % grp.PatrolWaypoints.Count;
+            Vector3 targetWp = grp.PatrolWaypoints[wpIndex];
+
+            int arrivedCount = 0;
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                if ((p.Position - targetWp).Length() < 5.0f)
+                {
+                    arrivedCount++;
+                }
+            }
+
+            if (arrivedCount >= Math.Max(1, members.Count / 2))
+            {
+                grp.CurrentPatrolIndex = (grp.CurrentPatrolIndex + 1) % grp.PatrolWaypoints.Count;
+                targetWp = grp.PatrolWaypoints[grp.CurrentPatrolIndex];
+            }
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                members[i].Task.FollowNavMeshTo(targetWp);
+            }
+        }
+
+        private void UpdateIndependentWanderBehavior(CrowdGroup grp, List<Ped> members)
+        {
+            Vector3 center = grp.SpawnCenter;
+            float radius = grp.MovementRadius;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                Ped p = members[i];
+                if ((p.Position - center).Length() > radius * 1.3f)
+                {
+                    p.Task.FollowNavMeshTo(center);
+                }
+            }
+        }
+
+        private Ped ElectNewLeader(CrowdGroup grp)
+        {
+            grp.LeaderHandle = 0;
+            for (int i = 0; i < grp.MemberHandles.Count; i++)
+            {
+                Ped p = Entity.FromHandle(grp.MemberHandles[i]) as Ped;
+                if (p != null && p.Exists() && !p.IsDead)
+                {
+                    grp.LeaderHandle = p.Handle;
+                    Log(string.Format("INFO: Elected new leader Ped #{0} for group {1}", p.Handle, grp.GroupId));
+                    return p;
+                }
+            }
+            return null;
+        }
+
+        private CrowdPedRecord FindPedRecord(int handle)
+        {
+            lock (_lock)
+            {
+                for (int i = 0; i < _crowdRegistry.Count; i++)
+                {
+                    if (_crowdRegistry[i].Handle == handle) return _crowdRegistry[i];
+                }
+            }
+            return null;
+        }
+
+        private void ReleaseGroupModels(CrowdGroup grp)
+        {
+            if (grp.ModelPool == null) return;
+            foreach (Model m in grp.ModelPool.Values)
+            {
+                try
+                {
+                    if (m != null && m.IsLoaded)
+                    {
+                        m.MarkAsNoLongerNeeded();
+                    }
+                }
+                catch { }
+            }
+            grp.ModelPool.Clear();
+            grp.ModelRequestedPool.Clear();
+            grp.ModelLoadedPool.Clear();
+            grp.ModelRequestStartPool.Clear();
+        }
+
+        private string PickModelFromCatalog(List<ModelCatalogItem> catalog, string fallback)
+        {
+            if (catalog == null || catalog.Count == 0) return fallback;
+            if (catalog.Count == 1) return catalog[0].ModelName;
+
+            int totalWeight = 0;
+            for (int i = 0; i < catalog.Count; i++) totalWeight += catalog[i].Weight;
+            if (totalWeight <= 0) return catalog[0].ModelName;
+
+            int r = _rng.Next(totalWeight);
+            int accum = 0;
+            for (int i = 0; i < catalog.Count; i++)
+            {
+                accum += catalog[i].Weight;
+                if (r < accum) return catalog[i].ModelName;
+            }
+            return catalog[0].ModelName;
+        }
+
+        private Vector3? ParseVector3Dict(Dictionary<string, object> dict)
+        {
+            if (dict == null) return null;
+            float x = 0f, y = 0f, z = 0f;
+            if (dict.ContainsKey("x")) float.TryParse(Convert.ToString(dict["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out x);
+            if (dict.ContainsKey("y")) float.TryParse(Convert.ToString(dict["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out y);
+            if (dict.ContainsKey("z")) float.TryParse(Convert.ToString(dict["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out z);
+            return new Vector3(x, y, z);
+        }
+
+        private Dictionary<string, object> SerializeVector3(Vector3 v)
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["x"] = Math.Round(v.X, 2);
+            d["y"] = Math.Round(v.Y, 2);
+            d["z"] = Math.Round(v.Z, 2);
+            return d;
+        }
+
+        private Dictionary<string, object> SerializeGroup(CrowdGroup grp)
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["group_id"] = grp.GroupId;
+            d["name"] = grp.Name;
+            d["primary_model"] = grp.PrimaryModel;
+            d["target_count"] = grp.TargetCount;
+            d["spawned_count"] = grp.SpawnedCount;
+            d["alive_count"] = grp.MemberHandles.Count;
+            d["failed_count"] = grp.FailedCount;
+            d["pending_count"] = grp.PendingCount;
+            d["status"] = grp.Status;
+            d["spawn_radius"] = Math.Round(grp.SpawnRadius, 2);
+            d["movement_radius"] = Math.Round(grp.MovementRadius, 2);
+            d["spawn_rate"] = Math.Round(grp.SpawnRate, 2);
+            d["behavior"] = grp.Behavior;
+            d["leader_handle"] = grp.LeaderHandle;
+            d["density_aware"] = grp.DensityAware;
+            d["color"] = grp.Color;
+            d["move_speed"] = grp.MoveSpeed;
+            d["arrival_behavior"] = grp.ArrivalBehavior;
+            d["vehicle_cleanup"] = grp.VehicleCleanup;
+            d["vehicle_cleanup_radius"] = Math.Round(grp.VehicleCleanupRadius, 2);
+            d["vehicle_cleanup_center"] = grp.VehicleCleanupCenter ?? "ORIGIN";
+            d["created_at"] = grp.CreatedAt.ToString("o");
+
+            if (grp.Origin.HasValue)
+            {
+                d["origin"] = SerializeVector3(grp.Origin.Value);
+                d["origin_radius"] = Math.Round(grp.OriginRadius, 2);
+            }
+            if (grp.Destination.HasValue)
+            {
+                d["destination"] = SerializeVector3(grp.Destination.Value);
+                d["destination_radius"] = Math.Round(grp.DestinationRadius, 2);
+            }
+
+            List<Dictionary<string, object>> wpList = new List<Dictionary<string, object>>();
+            if (grp.RouteWaypoints != null)
+            {
+                for (int i = 0; i < grp.RouteWaypoints.Count; i++)
+                {
+                    wpList.Add(SerializeVector3(grp.RouteWaypoints[i]));
+                }
+            }
+            d["waypoints"] = wpList;
+
+            d["despawn_checkpoint_enabled"] = grp.DespawnCheckpointEnabled;
+            if (grp.DespawnCheckpoint.HasValue)
+            {
+                d["despawn_checkpoint"] = SerializeVector3(grp.DespawnCheckpoint.Value);
+                d["despawn_radius"] = Math.Round(grp.DespawnRadius, 2);
+            }
+            d["continuous_stream"] = grp.ContinuousStream;
+            d["exited_count"] = grp.ExitedCount;
+
+            return d;
+        }
+
+        private Dictionary<string, object> SerializeExperiment()
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["name"] = _experiment.Name;
+            d["state"] = _experiment.State;
+            d["area_type"] = _experiment.AreaType;
+            d["center_x"] = _experiment.CenterX;
+            d["center_y"] = _experiment.CenterY;
+            d["center_z"] = _experiment.CenterZ;
+            d["width"] = _experiment.Width;
+            d["height"] = _experiment.Height;
+            d["radius"] = _experiment.Radius;
+            d["vehicle_cleanup"] = _experiment.VehicleCleanup;
+            d["grid_resolution"] = _experiment.GridResolution;
+            d["allow_outside_routing"] = _experiment.AllowOutsideRouting;
+            return d;
+        }
+
+        #endregion
+
+        #region Background Networking Worker
+
+        private void EnqueueAck(Dictionary<string, object> ackData)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            string ackJson = serializer.Serialize(ackData);
+            lock (_lock)
+            {
+                _outboundQueue.Enqueue(ackJson);
+            }
+        }
+
+        private void SendErrorAck(CommandItem cmd, string errorMsg)
+        {
+            Log(string.Format("WARN: Command failed: {0} (ReqID: {1}) - {2}", cmd.Command, cmd.RequestId, errorMsg));
+            Dictionary<string, object> ackData = new Dictionary<string, object>();
+            ackData["request_id"] = cmd.RequestId;
+            ackData["command"] = cmd.Command;
+            ackData["status"] = "ERROR";
+            ackData["error"] = errorMsg;
+            ackData["game_time"] = Game.GameTime;
+            ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+
+            EnqueueAck(ackData);
+        }
+
+        private void NetworkWorkerLoop()
+        {
+            int consecutiveAckFailures = 0;
+
+            while (_isRunning)
+            {
+                // Step A: Send pending acknowledgments
+                try
+                {
+                    string ackToSend = null;
+                    lock (_lock)
+                    {
+                        if (_outboundQueue.Count > 0)
+                        {
+                            ackToSend = _outboundQueue.Peek();
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(ackToSend))
+                    {
+                        Log(string.Format("DIAG: Posting ACK from outbound queue: {0}", ackToSend));
+                        bool sent = SendHttpPost(AckUrl, ackToSend);
+                        if (sent)
+                        {
+                            consecutiveAckFailures = 0;
+                            lock (_lock)
+                            {
+                                if (_outboundQueue.Count > 0 && _outboundQueue.Peek() == ackToSend)
+                                {
+                                    _outboundQueue.Dequeue();
+                                }
+                            }
+                        }
+                        else
+                        {
+                            consecutiveAckFailures++;
+                            if (consecutiveAckFailures >= 5)
+                            {
+                                Log(string.Format("ERROR: Discarding un-acknowledgeable item after 5 failed attempts: {0}", ackToSend));
+                                lock (_lock)
+                                {
+                                    if (_outboundQueue.Count > 0 && _outboundQueue.Peek() == ackToSend)
+                                    {
+                                        _outboundQueue.Dequeue();
+                                    }
+                                }
+                                consecutiveAckFailures = 0;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("WARN: Network worker outbound ACK step error: {0}", ex.Message));
+                }
+
+                // Step B: Poll for new commands from bridge with live telemetry
+                try
+                {
+                    string pollUrlWithParams = PollUrl;
+                    lock (_lock)
+                    {
+                        if (_cachedPlayerValid)
+                        {
+                            pollUrlWithParams = string.Format(
+                                CultureInfo.InvariantCulture,
+                                "{0}?px={1:F2}&py={2:F2}&pz={3:F2}&h={4:F1}&handle={5}&groups={6}&peds={7}",
+                                PollUrl,
+                                _cachedPlayerPos.X,
+                                _cachedPlayerPos.Y,
+                                _cachedPlayerPos.Z,
+                                _cachedPlayerHeading,
+                                _cachedPlayerHandle,
+                                _groups.Count,
+                                _crowdRegistry.Count
+                            );
+                        }
+                    }
+
+                    string pollResponse = SendHttpGet(pollUrlWithParams);
+                    if (!string.IsNullOrEmpty(pollResponse))
+                    {
+                        CommandItem parsedCmd = ParseCommandFromJson(pollResponse);
+                        if (parsedCmd != null)
+                        {
+                            Log(string.Format("DIAG: Parsed command from poll: {0} (ReqID: {1})", parsedCmd.Command, parsedCmd.RequestId));
+                            int qCount;
+                            lock (_lock)
+                            {
+                                _inboundQueue.Enqueue(parsedCmd);
+                                qCount = _inboundQueue.Count;
+                            }
+                            Log(string.Format("DIAG: Enqueued to _inboundQueue: {0} (ReqID: {1}, QueueLengthAfter: {2})", parsedCmd.Command, parsedCmd.RequestId, qCount));
+                        }
+                    }
+                }
+                catch (WebException wex)
+                {
+                    Log(string.Format("WARN: Network worker poll WebException: {0}", wex.Message));
+                    Thread.Sleep(500);
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("WARN: Network worker poll exception: {0}", ex.Message));
+                }
+
+                Thread.Sleep(100);
+            }
+        }
+
+        private static string SendHttpGet(string url)
+        {
+            ServicePointManager.DefaultConnectionLimit = 50;
+            ServicePointManager.Expect100Continue = false;
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 1500;
+            request.ReadWriteTimeout = 1500;
+            request.KeepAlive = false;
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        private static bool SendHttpPost(string url, string jsonBody)
+        {
+            try
+            {
+                ServicePointManager.DefaultConnectionLimit = 50;
+                ServicePointManager.Expect100Continue = false;
+
+                byte[] bytes = Encoding.UTF8.GetBytes(jsonBody);
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "POST";
+                request.ContentType = "application/json; charset=utf-8";
+                request.ContentLength = bytes.Length;
+                request.Timeout = 2000;
+                request.ReadWriteTimeout = 2000;
+                request.KeepAlive = false;
+
+                using (Stream reqStream = request.GetRequestStream())
+                {
+                    reqStream.Write(bytes, 0, bytes.Length);
+                }
+
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                using (Stream respStream = response.GetResponseStream())
+                {
+                    Log(string.Format("DIAG: SendHttpPost OK (StatusCode: {0})", (int)response.StatusCode));
+                    return response.StatusCode == HttpStatusCode.OK;
+                }
+            }
+            catch (WebException wex)
+            {
+                int code = 0;
+                string body = "";
+                HttpWebResponse hr = wex.Response as HttpWebResponse;
+                if (hr != null)
+                {
+                    code = (int)hr.StatusCode;
+                    try
+                    {
+                        using (Stream s = hr.GetResponseStream())
+                        using (StreamReader r = new StreamReader(s))
+                        {
+                            body = r.ReadToEnd();
+                        }
+                    }
+                    catch { }
+                }
+                Log(string.Format("WARN: SendHttpPost WebException (Status: {0}, Error: {1}, Body: {2})", code, wex.Message, body));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("WARN: SendHttpPost Exception: {0}", ex.Message));
+                return false;
+            }
+        }
+
+        private static CommandItem ParseCommandFromJson(string json)
+        {
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> root = serializer.Deserialize<Dictionary<string, object>>(json);
+                if (root == null || !root.ContainsKey("has_command") || !(bool)root["has_command"]) return null;
+                if (!root.ContainsKey("command") || !(root["command"] is Dictionary<string, object>)) return null;
+
+                Dictionary<string, object> cmdDict = (Dictionary<string, object>)root["command"];
+                string reqId = cmdDict.ContainsKey("request_id") ? cmdDict["request_id"] as string : null;
+                string cmdName = cmdDict.ContainsKey("command") ? cmdDict["command"] as string : null;
+
+                if (string.IsNullOrEmpty(reqId) || string.IsNullOrEmpty(cmdName)) return null;
+
+                Dictionary<string, object> payloadDict = null;
+                if (cmdDict.ContainsKey("payload") && cmdDict["payload"] is Dictionary<string, object>)
+                {
+                    payloadDict = (Dictionary<string, object>)cmdDict["payload"];
+                }
+
+                CommandItem item = new CommandItem();
+                item.RequestId = reqId.Trim();
+                item.Command = cmdName.Trim();
+                item.Payload = payloadDict;
+                return item;
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("WARN: ParseCommandFromJson exception: {0}", ex.Message));
+                return null;
+            }
+        }
+
+        #endregion
+
+        #region Logging
+
+        private static readonly object _fileLock = new object();
+
+        private static void Log(string message)
+        {
+            if (message != null && message.StartsWith("DIAG:") &&
+                (message.Contains("GET_TELEMETRY") || message.Contains("SendHttpPost OK")))
+            {
+                return; // suppress high-frequency telemetry polling noise
+            }
+            try
+            {
+                if (!Directory.Exists(LogDirectory))
+                {
+                    Directory.CreateDirectory(LogDirectory);
+                }
+
+                string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] {1}", DateTime.UtcNow, message);
+                lock (_fileLock)
+                {
+                    File.AppendAllText(LogFilePath, line + Environment.NewLine, Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+
+        #endregion
+
+        #region Inner Data Classes
+
+        private class ModelCatalogItem
+        {
+            public string ModelName { get; set; }
+            public int Weight { get; set; }
+        }
+
+        private class CrowdGroup
+        {
+            public string GroupId { get; set; }
+            public string Name { get; set; }
+            public string PrimaryModel { get; set; }
+            public List<ModelCatalogItem> Models { get; set; }
+            public int TargetCount { get; set; }
+            public int SpawnedCount { get; set; }
+            public int FailedCount { get; set; }
+            public int PendingCount { get; set; }
+            public float SpawnRadius { get; set; }
+            public float MovementRadius { get; set; }
+            public float SpawnRate { get; set; }
+            public string Behavior { get; set; }
+            public float FollowDistance { get; set; }
+            public bool DensityAware { get; set; }
+            public float DensityLimit { get; set; }
+            public string Status { get; set; }
+            public DateTime CreatedAt { get; set; }
+            public Vector3 SpawnCenter { get; set; }
+            public List<int> MemberHandles { get; set; }
+            public int LeaderHandle { get; set; }
+            public List<Vector3> PatrolWaypoints { get; set; }
+
+            // Stage 4 Route & Visual Fields
+            public Vector3? Origin { get; set; }
+            public float OriginRadius { get; set; }
+            public Vector3? Destination { get; set; }
+            public float DestinationRadius { get; set; }
+            public List<Vector3> RouteWaypoints { get; set; }
+            public float MoveSpeed { get; set; }
+            public string ArrivalBehavior { get; set; }
+            public string Color { get; set; }
+            public bool VehicleCleanup { get; set; }
+            public bool DespawnCheckpointEnabled { get; set; }
+            public Vector3? DespawnCheckpoint { get; set; }
+            public float DespawnRadius { get; set; }
+            public bool ContinuousStream { get; set; }
+            public int ExitedCount { get; set; }
+            public float VehicleCleanupRadius { get; set; }
+            public string VehicleCleanupCenter { get; set; }
+
+            public Dictionary<string, Model> ModelPool { get; set; }
+            public Dictionary<string, bool> ModelRequestedPool { get; set; }
+            public Dictionary<string, bool> ModelLoadedPool { get; set; }
+            public Dictionary<string, DateTime> ModelRequestStartPool { get; set; }
+
+            public DateTime LastSpawnTime { get; set; }
+            public DateTime LastBehaviorUpdate { get; set; }
+            public int CurrentPatrolIndex { get; set; }
+            public int RouteVersion { get; set; }
+
+            public CrowdGroup()
+            {
+                MemberHandles = new List<int>();
+                Models = new List<ModelCatalogItem>();
+                PatrolWaypoints = new List<Vector3>();
+                RouteWaypoints = new List<Vector3>();
+                ModelPool = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase);
+                ModelRequestedPool = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                ModelLoadedPool = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                ModelRequestStartPool = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                LastSpawnTime = DateTime.MinValue;
+                LastBehaviorUpdate = DateTime.MinValue;
+                LeaderHandle = 0;
+                FollowDistance = 3.0f;
+                MovementRadius = 30.0f;
+                DensityAware = false;
+                DensityLimit = 0.2f;
+                CurrentPatrolIndex = 0;
+                Origin = null;
+                OriginRadius = 5.0f;
+                Destination = null;
+                DestinationRadius = 8.0f;
+                MoveSpeed = 1.4f;
+                ArrivalBehavior = "WANDER";
+                Color = "#38bdf8";
+                DespawnCheckpointEnabled = false;
+                DespawnCheckpoint = null;
+                DespawnRadius = 8.0f;
+                ContinuousStream = true;
+                ExitedCount = 0;
+            }
+        }
+
+        private class CrowdPedRecord
+        {
+            public int Handle { get; set; }
+            public string ModelName { get; set; }
+            public DateTime CreatedAt { get; set; }
+            public string GroupId { get; set; }
+
+            // Stage 4 Navigation Fields
+            public int CurrentWaypointIndex { get; set; }
+            public bool IsReverseRoute { get; set; }
+            public bool HasReachedDestination { get; set; }
+            public bool HeadingToDespawn { get; set; }
+            public Vector3 DispersedDestination { get; set; }
+            public Vector3 DispersedOrigin { get; set; }
+            public DateTime LastTaskAssignTime { get; set; }
+            public int RouteVersion { get; set; }
+        }
+
+        private class CommandItem
+        {
+            public string RequestId { get; set; }
+            public string Command { get; set; }
+            public Dictionary<string, object> Payload { get; set; }
+        }
+
+        #endregion
+    }
+}

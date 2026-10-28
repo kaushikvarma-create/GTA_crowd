@@ -94,7 +94,7 @@ in this file and decrease the value.
 						<Item>
 							<!-- R* cap = 4 : Affects limits of total caihandling parameters in vehicleaihandlinginfo.meta (you can now have as many custom handlinginfo parameters as you wish)-->
 							<PoolName>caihandlinginfo</PoolName>
-							<PoolSize value="12" />
+							<PoolSize value="64" />
 						</Item>
 						<Item>
 							<!-- R* cap = 36 : Affects limits of total curvepoint parameters in vehicleaihandlinginfo.meta (you can now have as many custom curvepoint parameters as you wish)-->
@@ -584,6 +584,46 @@ in this file and decrease the value.
 							<PoolSize value="1024" />
 						</Item>
 						<Item>
+							<PoolName>pedintelligence</PoolName>
+							<PoolSize value="1024" />
+						</Item>
+						<Item>
+							<PoolName>fraginstnmgta</PoolName>
+							<PoolSize value="1024" />
+						</Item>
+						<Item>
+							<PoolName>clegiksolver</PoolName>
+							<PoolSize value="128" />
+						</Item>
+						<Item>
+							<PoolName>clegiksolverproxy</PoolName>
+							<PoolSize value="512" />
+						</Item>
+						<Item>
+							<PoolName>cbodylookiksolver</PoolName>
+							<PoolSize value="128" />
+						</Item>
+						<Item>
+							<PoolName>cbodylookiksolverproxy</PoolName>
+							<PoolSize value="512" />
+						</Item>
+						<Item>
+							<PoolName>ctorsoiksolver</PoolName>
+							<PoolSize value="256" />
+						</Item>
+						<Item>
+							<PoolName>fwanimdirectorcomponentragdoll</PoolName>
+							<PoolSize value="1024" />
+						</Item>
+						<Item>
+							<PoolName>fwanimdirectorcomponentfacialrig</PoolName>
+							<PoolSize value="1024" />
+						</Item>
+						<Item>
+							<PoolName>fwanimdirectorcomponentsyncedscene</PoolName>
+							<PoolSize value="1024" />
+						</Item>
+						<Item>
 							<!-- Handles weapon logic, normally attached to weapon objects, most likely will never need to be increased -->
 							<PoolName>CWeapon</PoolName>
 							<PoolSize value="1024" />
@@ -800,7 +840,7 @@ in this file and decrease the value.
 						</Item>
 						<Item>
 							<PoolName>CTaskConversationHelper</PoolName>
-							<PoolSize value="4" />
+							<PoolSize value="64" />
 						</Item>
 						<Item>
 							<PoolName>SyncedScenes</PoolName>
@@ -882,26 +922,26 @@ in this file and decrease the value.
 				</PoolSizes>
 
 				<ConfigPopulation>
-					<ScenarioPedsMultiplier_Base value="70" />
-					<ScenarioPedsMultiplier value="100" />
-					<AmbientPedsMultiplier_Base value="70" />
-					<AmbientPedsMultiplier value="100" />
+					<ScenarioPedsMultiplier_Base value="0" />
+					<ScenarioPedsMultiplier value="0" />
+					<AmbientPedsMultiplier_Base value="0" />
+					<AmbientPedsMultiplier value="0" />
 					<MaxTotalPeds_Base value="500" />
 					<MaxTotalPeds value="1000" />
 					<PedMemoryMultiplier value="1000" />
-					<PedsForVehicles_Base value="75" />
-					<PedsForVehicles value="75" />
+					<PedsForVehicles_Base value="0" />
+					<PedsForVehicles value="0" />
 					<VehicleTimesliceMaxUpdatesPerFrame_Base value="4" />
 					<VehicleTimesliceMaxUpdatesPerFrame value="10" />
-					<VehicleAmbientDensityMultiplier_Base value="66" />
-					<VehicleAmbientDensityMultiplier value="100" />
+					<VehicleAmbientDensityMultiplier_Base value="0" />
+					<VehicleAmbientDensityMultiplier value="0" />
 					<VehicleMemoryMultiplier value="500" />
-					<VehicleParkedDensityMultiplier_Base value="50" />
-					<VehicleParkedDensityMultiplier value="130" />
-					<VehicleLowPrioParkedDensityMultiplier_Base value="50" />
-					<VehicleLowPrioParkedDensityMultiplier value="130" />
-					<VehicleUpperLimit_Base value="50" />
-					<VehicleUpperLimit value="130" />
+					<VehicleParkedDensityMultiplier_Base value="0" />
+					<VehicleParkedDensityMultiplier value="0" />
+					<VehicleLowPrioParkedDensityMultiplier_Base value="0" />
+					<VehicleLowPrioParkedDensityMultiplier value="0" />
+					<VehicleUpperLimit_Base value="0" />
+					<VehicleUpperLimit value="0" />
 					<VehicleUpperLimitMP value="60" />
 					<VehicleParkedUpperLimit_Base value="50" />
 					<VehicleParkedUpperLimit value="130" />

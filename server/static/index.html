@@ -74,27 +74,30 @@
     /* TOP SLIM TOOLBAR OVER MAP */
     .map-toolbar {
       position: absolute;
-      top: 12px;
-      left: 12px;
-      right: 12px;
+      top: 10px;
+      left: 10px;
+      right: 10px;
       z-index: 30;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-start;
+      align-content: flex-start;
       pointer-events: none;
-      gap: 10px;
+      gap: 6px;
     }
 
     .toolbar-group {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 6px;
-      background: rgba(15, 23, 42, 0.88);
+      gap: 4px;
+      background: rgba(15, 23, 42, 0.92);
       backdrop-filter: blur(8px);
-      padding: 5px 8px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      padding: 4px 6px;
+      border-radius: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
       pointer-events: auto;
     }
 
@@ -102,22 +105,31 @@
       background: #1e293b;
       color: #cbd5e1;
       border: 1px solid #334155;
-      padding: 5px 9px;
+      padding: 4px 8px;
       border-radius: 5px;
-      font-size: 0.74rem;
+      font-size: 0.71rem;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      justify-content: center;
+      gap: 4px;
       transition: all 0.15s ease;
       white-space: nowrap;
+      line-height: 1.2;
     }
     .tool-btn:hover {
       background: #334155;
       color: #fff;
       border-color: #475569;
     }
+        #mode-teleport.active {
+      background: #7c3aed !important;
+      color: #fff !important;
+      border-color: #a78bfa !important;
+      box-shadow: 0 0 10px rgba(167, 139, 250, 0.4) !important;
+    }
+
     .tool-btn.active {
       background: #0284c7;
       color: #fff;
@@ -239,16 +251,15 @@
 
     /* 2. FIXED STICKY ACTION TOOLBAR (Height: 44px) */
     .sidebar-action-bar {
-      height: 44px;
       min-height: 44px;
-      max-height: 44px;
-      padding: 6px 12px;
+      padding: 6px 10px;
       background: #141e30;
       border-bottom: 1px solid var(--card-border);
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 6px;
+      gap: 4px;
       flex-shrink: 0;
       box-sizing: border-box;
     }
@@ -381,6 +392,7 @@
     /* FORM STYLING */
     .form-row {
       display: flex;
+      align-items: flex-end;
       gap: 8px;
     }
     .form-group {
@@ -388,13 +400,17 @@
       flex-direction: column;
       gap: 4px;
       flex: 1;
+      min-width: 0;
     }
     label {
-      font-size: 0.70rem;
+      font-size: 0.67rem;
       font-weight: 600;
       color: var(--text-muted);
       text-transform: uppercase;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.25px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .form-control {
       background: #090e17;
@@ -539,9 +555,11 @@
       background: #1e293b;
       color: #cbd5e1;
       border: 1px solid #334155;
-      padding: 2px 5px;
+      padding: 3px 6px;
       border-radius: 3px;
       font-size: 0.66rem;
+      font-weight: 600;
+      white-space: nowrap;
       cursor: pointer;
     }
     .btn-xs:hover {
@@ -561,13 +579,14 @@
       border: 1px solid #334155;
       padding: 5px 10px;
       border-radius: 4px;
-      font-size: 0.74rem;
+      font-size: 0.73rem;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 5px;
+      white-space: nowrap;
       transition: all 0.15s;
     }
     .btn:hover {
@@ -740,14 +759,50 @@
 
         <div class="toolbar-group">
           <button class="tool-btn active" id="mode-pan">✋ Pan</button>
-          <button class="tool-btn" id="mode-point">📍 Set Point</button>
-          <button class="tool-btn" id="mode-origin">🎯 Set Origin</button>
-          <button class="tool-btn" id="mode-dest">🏁 Set Dest</button>
+          <button class="tool-btn" id="mode-point">📍 Point</button>
+          <button class="tool-btn" id="mode-origin">🎯 Origin</button>
+          <button class="tool-btn" id="mode-dest">🏁 Dest</button>
+          <button class="tool-btn" id="mode-via" title="Click on map to add intermediate checkpoints/vias">🚩 + Via</button>
+          <button class="tool-btn" id="mode-despawn" title="Click on map to set separate final despawn checkpoint">🏁 Despawn</button>
+          <button class="tool-btn" id="mode-teleport" title="Click anywhere on the map to teleport player there">⚡ Teleport</button>
+          <button class="tool-btn" id="btn-toggle-fly" title="Toggle Freecam / Fly Mode (or press F6 in GTA V)">🦅 Fly: OFF</button>
         </div>
 
         <div class="toolbar-group">
+          <select id="sel-quick-tp" class="tool-btn" style="padding:3px 7px; max-width:175px; background:#1e293b; color:#cbd5e1; border:1px solid #334155; border-radius:5px; font-weight:600; cursor:pointer; font-size:0.71rem;" title="Quick Teleport Presets">
+            <option value="">⚡ Teleport Preset...</option>
+            <option value="-1334.0,-3054.0,14.5">🎫 LSIA Station (Concourse Hall)</option>
+            <option value="-1334.0,-3066.0,14.5">⛺ LSIA Station (Market Plaza)</option>
+            <option value="-1334.0,-3074.0,14.5">🚌 LSIA Station (Outside Road)</option>
+            <option value="-1336.0,-3040.0,18.2">🌉 LSIA Station (Overbridge FOB)</option>
+            <option value="-1340.0,-3032.0,14.5">🚆 LSIA Station (Platform 2)</option>
+            <option value="522.0,-1672.0,19.3">🌉 La Mesa Overbridge Station (SOSA)</option>
+            <option value="-1037.0,-2737.0,20.2">✈️ LSIA Airport (Terminal)</option>
+            <option value="275.5,-1205.5,38.9">🚆 Strawberry Station</option>
+            <option value="-217.5,-1032.5,30.1">🏛️ Union Metro Station</option>
+            <option value="114.3,-1725.6,30.1">🚇 Davis Metro Station</option>
+            <option value="215.0,-915.0,30.0">🏢 Legion Square Plaza</option>
+            <option value="origin">🎯 Current Group Origin</option>
+            <option value="dest">🏁 Current Group Destination</option>
+          </select>
+        </div>
+
+        <div class="toolbar-group">
+          <button class="tool-btn" id="btn-open-prop-studio" onclick="openPropStudio()" style="background:#4f46e5; color:#fff; border-color:#6366f1;" title="Open Prop Manager & Station Studio">🛠️ Prop Manager</button>
+          <button class="tool-btn" id="btn-toolbar-save-props" onclick="window.saveCurrentPropsPrompt && window.saveCurrentPropsPrompt()" style="background:#16a34a; color:#fff; border-color:#22c55e;" title="Lock & Save All Placed Props in World as a Single Spawnable Composite Entity (or press F10 in GTA V)">💾 Save Props</button>
+          <button class="tool-btn" id="btn-toolbar-undo-prop" onclick="window.undoLastProp && window.undoLastProp()" style="background:#d97706; color:#fff; border-color:#f59e0b;" title="Undo Last Placed Prop (or press Ctrl+Z in GTA V)">↩ Undo Prop</button>
+          <button class="tool-btn" id="btn-toolbar-del-nearest-prop" onclick="window.deleteNearestProp && window.deleteNearestProp()" style="background:#be123c; color:#fff; border-color:#f43f5e;" title="Delete Nearest Prop to Player">🗑️ Del Nearest</button>
+          <button class="tool-btn" id="btn-clear-station" style="background:#881337; color:#fff; border-color:#f43f5e;" title="Clear All Placed Station & Menyoo Props">🧹 Clear All</button>
+          <button class="tool-btn" id="btn-build-station" style="background:#0f766e; color:#fff; border-color:#14b8a6;" title="Build Complete 4-Zone LSIA Station">🏛️ Build Station</button>
+          <button class="tool-btn" id="btn-toggle-3d-builder" style="background:#7c3aed; color:#fff; border-color:#a855f7;" title="Toggle In-Game 3D Builder (F11 in GTA V; F8/F9 for Menyoo)">🎮 Builder (F11)</button>
+        </div>
+
+        <div class="toolbar-group">
+          <button class="tool-btn active" id="btn-toggle-god" style="background:#15803d; color:#fff; border-color:#22c55e;" title="Toggle God Mode (F7 in GTA V)">🛡️ God: ON</button>
+          <button class="tool-btn" id="btn-clear-wanted" style="background:#b91c1c; color:#fff; border-color:#ef4444;" title="Clear Wanted Level">⭐ Clear Cops</button>
+          <button class="tool-btn active" id="btn-toggle-never-wanted" style="background:#0284c7; color:#fff; border-color:#38bdf8;" title="Toggle Never Wanted (F5 in GTA V)">🚫 No Cops: ON</button>
           <button class="tool-btn" id="btn-toggle-heatmap">🔥 Heatmap</button>
-          <button class="tool-btn active" id="btn-toggle-layer">🗺️ Real Map</button>
+          <button class="tool-btn active" id="btn-toggle-layer">🗺️ Map</button>
           <button class="tool-btn" id="btn-toggle-sidebar">◫ Sidebar</button>
         </div>
       </div>
@@ -779,6 +834,7 @@
           <button class="btn btn-primary" id="btn-popup-save-point" style="flex:1;">Save</button>
           <button class="btn btn-success" id="btn-popup-as-origin" style="flex:1;">As Origin</button>
           <button class="btn btn-warning" id="btn-popup-as-dest" style="flex:1;">As Dest</button>
+          <button class="btn" id="btn-popup-teleport" style="flex:1; background:#7c3aed; color:#fff;" title="Teleport player directly to this point">⚡ Teleport</button>
         </div>
       </div>
     </div>
@@ -818,6 +874,7 @@
       <div class="sidebar-nav-ribbon">
         <button class="nav-ribbon-btn" onclick="scrollToSection('card-group-manager')">👥 Groups</button>
         <button class="nav-ribbon-btn" onclick="scrollToSection('card-selected-group-editor')">⚙️ Config</button>
+        <button class="nav-ribbon-btn" onclick="scrollToSection('card-prop-manager')" style="color:#38bdf8; font-weight:700;">📦 Props</button>
         <button class="nav-ribbon-btn" onclick="scrollToSection('card-saved-points')">📍 Points</button>
         <button class="nav-ribbon-btn" onclick="scrollToSection('card-vehicle-cleanup')">🚗 Vehicles</button>
         <button class="nav-ribbon-btn" onclick="scrollToSection('card-exp-boundary')">📐 Bounds</button>
@@ -960,23 +1017,69 @@
               </div>
             </div>
 
-            <!-- Arrival Behavior & Waypoints -->
+            <!-- Arrival Behavior & Multi-Tier Checkpoints -->
             <div class="form-row">
-              <div class="form-group">
+              <div class="form-group" style="grid-column:span 2;">
                 <label>Arrival Behavior</label>
-                <select id="grp-arrival" class="form-control">
-                  <option value="NEXT_WAYPOINT">Loop Route (Two-Way Bidirectional)</option>
-                  <option value="DESPAWN_AT_DEST">Despawn at Destination (Continuous Stream)</option>
-                  <option value="WANDER">Wander Around Destination</option>
-                  <option value="GATHER">Stand Still / Gather</option>
-                  <option value="STOP">Stop</option>
+                <select id="grp-arrival" class="form-control" style="background:#090e17; font-weight:600; color:#38bdf8;">
+                  <option value="DESPAWN_AT_DEST" selected>🏁 Despawn at Destination (Continuous Endless Stream)</option>
+                  <option value="NEXT_WAYPOINT">🔄 Loop Route (Two-Way Bidirectional Patrol)</option>
+                  <option value="WANDER">🚶 Wander Around Destination</option>
+                  <option value="GATHER">👥 Stand Still / Gather</option>
+                  <option value="STOP">🛑 Stop</option>
                 </select>
               </div>
-              <div class="form-group">
-                <label>Waypoints (<span id="lbl-wp-count">0</span>)</label>
-                <div style="display:flex; gap:4px;">
-                  <button class="btn btn-xs" id="btn-clear-wps" style="flex:1; height:28px;">Clear WPs</button>
-                  <button class="btn btn-xs btn-primary" id="btn-save-route-to-db" style="flex:1.2; height:28px;" title="Save current route to the Path Database">💾 Save to DB</button>
+            </div>
+
+            <!-- Multi-Tier Checkpoints / Vias List -->
+            <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:8px; margin-bottom:8px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <label style="margin:0; font-size:0.72rem; text-transform:uppercase; color:#94a3b8; font-weight:700;">Checkpoints / Vias (<span id="lbl-wp-count" style="color:#38bdf8;">0</span>)</label>
+              </div>
+              <div style="display:flex; gap:4px; align-items:center; margin-bottom:6px;">
+                <button type="button" class="btn btn-xs btn-primary" id="btn-add-wp-dropdown" style="flex:1; padding:3px 4px; height:24px; font-size:0.68rem;" title="Add checkpoint via saved map points dropdown">+ Add Via</button>
+                <button type="button" class="btn btn-xs btn-secondary" id="btn-pick-wp-map" style="flex:1; padding:3px 4px; height:24px; font-size:0.68rem;" title="Click on map to drop or pick a checkpoint">📍 Click Map</button>
+                <button type="button" class="btn btn-xs btn-info" id="btn-order-wps" style="flex:1; padding:3px 4px; height:24px; font-size:0.68rem;" title="Order checkpoints logically along route from Origin to Destination">⚡ Auto-Flow</button>
+                <button type="button" class="btn btn-xs btn-warning" id="btn-clear-wps" style="padding:3px 6px; height:24px; font-size:0.68rem;" title="Clear all checkpoints">Clear</button>
+                <button type="button" class="btn btn-xs" id="btn-save-route-to-db" style="padding:3px 6px; height:24px; font-size:0.68rem; background:#1e293b; color:#94a3b8;" title="Save route to Path Database">💾 DB</button>
+              </div>
+              <div id="group-waypoints-list" style="max-height:160px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding-right:2px;">
+                <div style="color:var(--text-muted); font-size:0.72rem; font-style:italic; padding:4px;">No intermediate checkpoints added. Peds walk straight from Origin to Destination.</div>
+              </div>
+            </div>
+
+            <!-- Separate Despawn Checkpoint Card -->
+            <div style="background:#090e17; border:1px solid #7f1d1d; border-radius:4px; padding:8px; margin-bottom:8px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <label style="margin:0; font-size:0.75rem; text-transform:uppercase; color:#f87171; font-weight:700; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                  <input type="checkbox" id="grp-despawn-enabled" style="accent-color:#ef4444; width:15px; height:15px;">
+                  <span>🏁 Separate Despawn Checkpoint</span>
+                </label>
+                <span class="badge" id="badge-despawn-status" style="font-size:0.65rem; background:#450a0a; color:#fca5a5; padding:2px 6px; border-radius:3px;">DISABLED</span>
+              </div>
+              <div id="row-grp-despawn-settings" style="display:none; flex-direction:column; gap:6px;">
+                <div class="form-row" style="margin:0;">
+                  <div class="form-group" style="flex:2;">
+                    <label style="font-size:0.7rem; color:#cbd5e1;">Despawn Location Point</label>
+                    <select id="grp-despawn-select" class="form-control" style="background:#0f172a; border-color:#991b1b; color:#fecaca;"></select>
+                  </div>
+                  <div class="form-group" style="flex:1;">
+                    <label style="font-size:0.7rem; color:#cbd5e1;">Radius (m)</label>
+                    <input type="number" id="grp-despawn-radius" class="form-control" value="10" min="2" max="100" style="background:#0f172a; border-color:#991b1b; color:#fecaca;">
+                  </div>
+                  <div style="display:flex; align-items:flex-end;">
+                    <button type="button" class="btn btn-xs btn-danger" id="btn-pick-despawn-map" title="Click on map to set despawn checkpoint" style="height:28px; padding:0 8px;">🏁 Pick</button>
+                  </div>
+                </div>
+                <div style="font-size:0.68rem; color:#94a3b8; font-style:italic;">
+                  When enabled, peds walk Origin &rarr; Vias &rarr; Destination, then proceed to this final checkpoint to despawn. You can toggle this on/off anytime, even while spawning.
+                </div>
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-top:6px; padding-top:6px; border-top:1px dashed #334155;">
+                  <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#38bdf8; font-size:0.73rem; font-weight:600;">
+                    <input type="checkbox" id="grp-continuous-stream" checked style="accent-color:#38bdf8; width:15px; height:15px;">
+                    <span>🔄 Endless Stream (Auto-Replenish at Origin)</span>
+                  </label>
+                  <span class="badge" id="badge-stream-mode" style="font-size:0.65rem; background:#064e3b; color:#34d399; padding:2px 6px; border-radius:3px;">ACTIVE STREAM</span>
                 </div>
               </div>
             </div>
@@ -1006,10 +1109,12 @@
             </div>
 
             <!-- Group Live Status Bar -->
-            <div id="grp-live-status-bar" style="font-size:0.75rem; color:#94a3b8; padding:5px 8px; background:#0c121e; border:1px solid var(--card-border); border-radius:4px; margin-top:6px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
+            <div id="grp-live-status-bar" style="font-size:0.74rem; color:#94a3b8; padding:5px 8px; background:#0c121e; border:1px solid var(--card-border); border-radius:4px; margin-top:6px; margin-bottom:6px; display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center;">
               <span>Status: <b id="lbl-grp-status" style="color:#38bdf8;">READY</b></span>
               <span>Alive: <b id="lbl-grp-alive" style="color:#f8fafc;">0</b> / <span id="lbl-grp-target">20</span></span>
               <span>Pending: <b id="lbl-grp-pending">0</b></span>
+              <span>Exited: <b id="lbl-grp-exited" style="color:#f87171;">0</b> 🏁</span>
+              <span id="lbl-stream-indicator" style="color:#10b981; font-weight:700; font-size:0.7rem;">🌊 STREAMING</span>
             </div>
 
             <!-- Group Action Buttons -->
@@ -1021,6 +1126,92 @@
             <div style="display:flex; gap:6px; margin-top:6px;">
               <button class="btn btn-warning" id="btn-clear-group-peds" style="flex:1;" title="Despawn and delete all spawned people in this group">🧹 Delete People (0)</button>
               <button class="btn btn-danger" id="btn-del-group" style="flex:1;" title="Delete this group and remove its pedestrians">🗑 Delete Group</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD: DOCKED PROP MANAGER (UNDO, DELETE, SPAWN & MENYOO SYNC) -->
+        <div class="panel-card" id="card-prop-manager" style="border-color:#4f46e5;">
+          <div class="panel-header" onclick="toggleCard('card-prop-manager')" style="background:rgba(79, 70, 229, 0.18);">
+            <div class="panel-header-title">
+              <span>📦 Prop Manager (<span id="lbl-sidebar-props-count" style="color:#38bdf8;">0</span>)</span>
+            </div>
+            <div style="display:flex; gap:5px; align-items:center;" onclick="event.stopPropagation()">
+              <button class="btn btn-xs" onclick="window.fetchAllProps && window.fetchAllProps()" title="Sync & Refresh all props in world (including Menyoo F8/F9 props)">🔄 Sync</button>
+              <button class="btn btn-xs btn-primary" onclick="openPropStudio()" style="background:#4f46e5; border-color:#6366f1;">🛠️ Full Studio</button>
+            </div>
+          </div>
+          <div class="panel-body" style="gap:8px;">
+            <!-- Row 1: Undo Prop / Delete Nearest / Clear All -->
+            <div style="display:flex; gap:5px;">
+              <button class="btn" id="btn-sidebar-undo-prop" onclick="window.undoLastProp && window.undoLastProp()" style="flex:1.2; background:#d97706; border-color:#f59e0b; color:#fff; padding:6px 8px;" title="Undo Last Placed Prop (or press Ctrl+Z in GTA V)">↩ Undo Prop</button>
+              <button class="btn" id="btn-sidebar-del-nearest" onclick="window.deleteNearestProp && window.deleteNearestProp()" style="flex:1.2; background:#be123c; border-color:#f43f5e; color:#fff; padding:6px 8px;" title="Delete Closest Prop to Player">🎯 Del Nearest</button>
+              <button class="btn btn-danger" id="btn-sidebar-clear-props" onclick="window.clearAllManagedProps && window.clearAllManagedProps()" style="flex:0.9; padding:6px 8px;" title="Delete All Placed Props">🧹 Clear All</button>
+            </div>
+
+            <!-- Row 2: Save & Lock World Props as Single Composite Entity -->
+            <div style="background:#062016; border:1px solid #10b981; border-radius:4px; padding:7px;">
+              <label style="display:block; margin-bottom:4px; color:#34d399;">💾 Save &amp; Lock Props in World (As 1 Whole Entity)</label>
+              <div style="display:flex; gap:5px;">
+                <input type="text" id="txt-sidebar-save-layout-name" class="form-control" value="Custom_Station_Entity" placeholder="Entity / Station Name..." style="flex:1; font-size:0.71rem; padding:4px 6px; background:#090e17; border-color:#059669;" />
+                <button class="btn btn-success" id="btn-sidebar-save-layout" style="padding:4px 9px;" title="Persist all placed props in world AND save the whole assembly as a single spawnable entity">💾 Save Entity</button>
+              </div>
+              <div style="font-size:0.63rem; color:#6ee7b7; margin-top:3px;">
+                Locks all placed props in world + saves whole assembly as 1 spawnable unit &amp; Menyoo XML.
+              </div>
+            </div>
+
+            <!-- Row 3: Quick Spawn Station / Overbridge Prop -->
+            <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:7px;">
+              <label style="display:block; margin-bottom:4px; color:#38bdf8;">➕ Quick Spawn Station / Overbridge Prop</label>
+              <div style="display:flex; gap:5px;">
+                <select id="sel-sidebar-quick-prop" class="form-control" style="flex:1; font-size:0.71rem; padding:4px 6px;">
+                  <optgroup label="🌉 Stations of SA (Add-On 3D Models)">
+                    <option value="prop_walkway1">prop_walkway1 — Concrete Foot-Overbridge w/ Stairs</option>
+                    <option value="prop_trainstation2">prop_trainstation2 — Full Platform w/ Curved Canopy</option>
+                    <option value="prop_trainstation1">prop_trainstation1 — Full Train Station Platform 1</option>
+                    <option value="prop_trainstation3">prop_trainstation3 — Full Train Station Platform 3</option>
+                    <option value="prop_traincrossing1">prop_traincrossing1 — Railway Track Crossing</option>
+                  </optgroup>
+                  <optgroup label="🧱 Sandy Shores &amp; Modular Station Props">
+                    <option value="prop_fib_wallfrag01">prop_fib_wallfrag01 — Concrete Platform Floor Slab</option>
+                    <option value="prop_test_elevator">prop_test_elevator — Overbridge Elevator Shaft</option>
+                    <option value="prop_rf_conc_pillar">prop_rf_conc_pillar — Heavy Concrete Bridge Pillar</option>
+                    <option value="port_xr_stairs_01">port_xr_stairs_01 — Full Station Staircase</option>
+                    <option value="prop_train_ticket_02">prop_train_ticket_02 — Train Ticket Machine</option>
+                    <option value="hei_prop_station_gate">hei_prop_station_gate — Metro Station Gate</option>
+                    <option value="prop_turnstyle_01">prop_turnstyle_01 — Commuter Turnstile</option>
+                    <option value="bkr_prop_biker_bblock_lrg1">bkr_prop_biker_bblock_lrg1 — Large Concrete Platform</option>
+                    <option value="hei_prop_carrier_stair_01a">hei_prop_carrier_stair_01a — Full Staircase w/ Rails</option>
+                  </optgroup>
+                </select>
+                <button class="btn btn-primary" id="btn-sidebar-quick-spawn" style="padding:4px 9px;" title="Spawn selected prop 4m in front of player">➕ Spawn</button>
+              </div>
+            </div>
+
+            <!-- Row 4: Spawn Saved Composite Entity / Menyoo XML Layout -->
+            <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:7px;">
+              <label style="display:block; margin-bottom:4px; color:#a78bfa;">📂 Spawn Saved Composite Entity / Station</label>
+              <div style="display:flex; flex-direction:column; gap:5px;">
+                <select id="sel-sidebar-saved-layouts" class="form-control" style="width:100%; font-size:0.71rem; padding:4px 6px;">
+                  <option value="">Loading saved entities...</option>
+                </select>
+                <div style="display:flex; gap:5px;">
+                  <button class="btn" id="btn-sidebar-load-layout" style="flex:1; background:#7c3aed; border-color:#a855f7; color:#fff; padding:4px 6px;" title="Spawn whole saved entity at its original saved world coordinates">📍 At Saved Coords</button>
+                  <button class="btn" id="btn-sidebar-spawn-entity-here" style="flex:1; background:#0284c7; border-color:#38bdf8; color:#fff; padding:4px 6px;" title="Spawn whole multi-prop assembly right in front of player as a single unit">🧍 Spawn Here (1 Entity)</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Row 4: Live Placed Props List (Menyoo + CrowdSim) -->
+            <div style="background:#090e17; border:1px solid var(--card-border); border-radius:4px; padding:7px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+                <label style="margin:0; color:#cbd5e1;">📋 Placed Props (Menyoo &amp; Web)</label>
+                <span style="font-size:0.64rem; color:#94a3b8;">In-Game Undo: <code style="color:#fbbf24;">Ctrl+Z</code></span>
+              </div>
+              <div id="sidebar-props-list" style="max-height:210px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding-right:2px;">
+                <div style="font-size:0.70rem; color:#64748b; text-align:center; padding:10px;">No custom props placed yet. Spawn above or press F8/F9 in Menyoo!</div>
+              </div>
             </div>
           </div>
         </div>
@@ -1315,7 +1506,1297 @@
     </div>
   </div>
 
+    <!-- Prop Placer & Station Designer Studio Modal -->
+  <div class="modal-backdrop" id="modal-prop-studio">
+    <div class="modal-dialog" style="width: 720px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:10px;">
+        <div>
+          <div class="modal-title" style="font-size:16px; font-weight:700; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+            <span>🛠️ Prop Placer & Station Editor Studio</span>
+          </div>
+          <div style="font-size:11px; color:#94a3b8; margin-top:2px;">Spawn, elevate, nudge, rotate props, place station buildings, stairs, bridges, and save custom layouts.</div>
+        </div>
+        <button class="tool-btn" id="btn-close-prop-studio" onclick="closePropStudio()" style="background:transparent; border:none; font-size:18px; color:#94a3b8; cursor:pointer;">✖</button>
+      </div>
+
+      <!-- Studio Sub-Navigation Tabs -->
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding: 10px 0; border-bottom: 1px solid #1e293b;">
+        <div style="display: flex; gap: 6px;">
+          <button class="tool-btn active" id="tab-btn-spawn" style="padding: 5px 12px; font-size: 12px;">➕ Spawn Props</button>
+          <button class="tool-btn" id="tab-btn-transform" style="padding: 5px 12px; font-size: 12px;">🎮 Live Nudge & Transform</button>
+          <button class="tool-btn" id="tab-btn-propslist" style="padding: 5px 12px; font-size: 12px;">📋 Placed Props (<span id="lbl-props-count">0</span>)</button>
+          <button class="tool-btn" id="tab-btn-presets" style="padding: 5px 12px; font-size: 12px;">💾 Layouts & Presets</button>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button class="tool-btn" onclick="window.undoLastProp && window.undoLastProp()" style="background:#d97706; color:#fff; border-color:#f59e0b; padding: 5px 10px; font-size: 11px;">↩ Undo Last Prop</button>
+          <button class="tool-btn" onclick="window.deleteNearestProp && window.deleteNearestProp()" style="background:#be123c; color:#fff; border-color:#f43f5e; padding: 5px 10px; font-size: 11px;">🎯 Delete Nearest</button>
+          <button class="tool-btn" onclick="window.clearAllManagedProps && window.clearAllManagedProps()" style="background:#881337; color:#fff; border-color:#f43f5e; padding: 5px 10px; font-size: 11px;">🧹 Clear All</button>
+        </div>
+      </div>
+
+      <div class="modal-body" style="overflow-y: auto; flex: 1; padding: 12px 0;">
+        <!-- IN-GAME 3D MENYOO SPOONER BANNER -->
+        <div style="background:rgba(124, 58, 237, 0.14); border:1px solid #8b5cf6; border-radius:6px; padding:10px 12px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <div style="font-size:11px; color:#e2e8f0; line-height:1.45;">
+            <strong style="color:#c4b5fd; font-size:12px;">🎮 In-Game Menyoo (F8 / F9) &amp; 3D Prop Builder (F11) + Instant Undo (Ctrl+Z):</strong><br/>
+            All props spawned in Menyoo (<code>F8</code>/<code>F9</code>) or here in the Web Studio automatically appear in the Prop Manager! Press <code>Ctrl+Z</code> in-game or click <b>↩ Undo Last Prop</b> anytime to undo the last placed prop.
+          </div>
+          <button class="tool-btn" id="btn-studio-toggle-3d-builder" style="background:#7c3aed; color:#fff; border-color:#a855f7; padding:7px 12px; font-weight:700; white-space:nowrap;">🎮 Toggle 3D Builder (F11)</button>
+        </div>
+
+        <!-- TAB 1: SPAWN PROPS -->
+        <div id="prop-tab-spawn">
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #1e293b; margin-bottom:12px;">
+            <div style="font-weight:600; font-size:13px; color:#38bdf8; margin-bottom:8px;">📦 Select Prop from Station, Overbridge &amp; Market Catalog</div>
+            
+            <div style="margin-bottom:10px;">
+              <label style="font-size:11px; color:#94a3b8; display:block; margin-bottom:4px;">Category &amp; Model:</label>
+              <select id="sel-prop-catalog" style="width:100%; padding:7px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px; font-size:12px;">
+                <optgroup label="🚆 0. Stations of San Andreas &amp; Sandy Shores (Custom Station Props)">
+                  <option value="prop_walkway1">prop_walkway1 - SOSA Full Concrete Foot-Overbridge w/ Stairs &amp; Arches</option>
+                  <option value="prop_trainstation2">prop_trainstation2 - SOSA Full Railway Platform w/ Curved Canopy &amp; Kiosks</option>
+                  <option value="prop_trainstation1">prop_trainstation1 - SOSA Full Train Station Platform Variant 1</option>
+                  <option value="prop_trainstation3">prop_trainstation3 - SOSA Full Train Station Platform Variant 3</option>
+                  <option value="prop_traincrossing1">prop_traincrossing1 - SOSA Railway Crossing &amp; Platform Connector</option>
+                  <option value="prop_fib_wallfrag01">prop_fib_wallfrag01 - Sandy Shores Concrete Platform Floor Slab</option>
+                  <option value="prop_test_elevator">prop_test_elevator - Sandy Shores Overbridge Elevator Shaft</option>
+                  <option value="prop_rf_conc_pillar">prop_rf_conc_pillar - Sandy Shores Heavy Concrete Bridge Pillar</option>
+                  <option value="port_xr_stairs_01">port_xr_stairs_01 - Sandy Shores Full Station Staircase</option>
+                  <option value="prop_train_ticket_02">prop_train_ticket_02 - Official Train Ticket Machine</option>
+                </optgroup>
+                <optgroup label="🌉 1. Full-Size Overbridges &amp; Elevated Decks (FOB)">
+                  <option value="prop_gate_bridge_ld">prop_gate_bridge_ld - Full-Size Overpass Bridge Span</option>
+                  <option value="stt_prop_stunt_track_dwshort">stt_prop_stunt_track_dwshort - Full-Size Elevated Bridge w/ Side Walls</option>
+                  <option value="stt_prop_stunt_track_straight">stt_prop_stunt_track_straight - Long Elevated Highway / Bridge Span</option>
+                  <option value="bkr_prop_biker_bblock_sml2">bkr_prop_biker_bblock_sml2 - Full-Size Monolithic Concrete Bridge Deck</option>
+                  <option value="stt_prop_stunt_bblock_mdm2">stt_prop_stunt_bblock_mdm2 - Wide Flat Elevated Bridge Deck Slab</option>
+                  <option value="prop_container_03a">prop_container_03a - Enclosed Walk-Through Skybridge Corridor</option>
+                </optgroup>
+                <optgroup label="🧱 2. Full-Size Platforms &amp; Concrete Slabs">
+                  <option value="bkr_prop_biker_bblock_lrg1">bkr_prop_biker_bblock_lrg1 - Full-Size Concrete Train Platform (Large)</option>
+                  <option value="bkr_prop_biker_bblock_mdm1">bkr_prop_biker_bblock_mdm1 - Full-Size Concrete Train Platform (Medium)</option>
+                  <option value="bkr_prop_biker_bblock_sml1">bkr_prop_biker_bblock_sml1 - Full-Size Concrete Platform Section (Small)</option>
+                  <option value="bkr_prop_biker_bblock_xl1">bkr_prop_biker_bblock_xl1 - Extra-Large Concrete Station Platform</option>
+                  <option value="bkr_prop_biker_bblock_huge_01">bkr_prop_biker_bblock_huge_01 - Mega Concrete Station Foundation Pad</option>
+                  <option value="stt_prop_stunt_bblock_lrg2">stt_prop_stunt_bblock_lrg2 - Large Smooth Concrete Platform Slab</option>
+                  <option value="stt_prop_stunt_bblock_xl2">stt_prop_stunt_bblock_xl2 - Extra-Large Smooth Concrete Platform Slab</option>
+                </optgroup>
+                <optgroup label="🪜 3. Full-Size Staircases &amp; Ramps">
+                  <option value="hei_prop_carrier_stair_01a">hei_prop_carrier_stair_01a - Full-Height Industrial Staircase w/ Rails</option>
+                  <option value="prop_byard_steps_01">prop_byard_steps_01 - Full-Piece Pedestrian Stairway w/ Rails</option>
+                  <option value="prop_steps_big_01">prop_steps_big_01 - Wide Solid Concrete Station Steps</option>
+                  <option value="bkr_prop_biker_bblock_hump_01">bkr_prop_biker_bblock_hump_01 - Full-Width Concrete Walkable Ramp</option>
+                  <option value="stt_prop_stunt_wideramp">stt_prop_stunt_wideramp - Wide Elevated Overbridge Access Ramp</option>
+                </optgroup>
+                <optgroup label="🎫 4. Station Buildings, Turnstiles &amp; Booths">
+                  <option value="prop_portacabin01">prop_portacabin01 - Full-Size Modular Station Hall Building</option>
+                  <option value="hei_prop_station_gate">hei_prop_station_gate - Official Metro / Train Station Gate</option>
+                  <option value="prop_turnstyle_01">prop_turnstyle_01 - Single Commuter Turnstile Gate</option>
+                  <option value="prop_turnstyle_bars">prop_turnstyle_bars - Turnstile Array Guide Bars</option>
+                  <option value="prop_tollbooth_1">prop_tollbooth_1 - Ticket &amp; Information Booth</option>
+                  <option value="prop_vend_snak_01">prop_vend_snak_01 - Station Concourse Ticket / Snack Kiosk</option>
+                  <option value="prop_vend_soda_01">prop_vend_soda_01 - Concourse Beverage Machine</option>
+                  <option value="prop_barier_conc_05a">prop_barier_conc_05a - Wide Concrete Perimeter Wall</option>
+                </optgroup>
+                <optgroup label="⛺ 5. Simulated Market Stalls & Props">
+                  <option value="prop_gazebo_02">prop_gazebo_02 - Market Vendor Canopy Tent</option>
+                  <option value="prop_parasol_01">prop_parasol_01 - Street Market Stall Umbrella</option>
+                  <option value="prop_table_03">prop_table_03 - Market Vendor Display Table</option>
+                  <option value="prop_table_04">prop_table_04 - Long Folding Market Table</option>
+                  <option value="prop_crate_01a">prop_crate_01a - Market Produce Wooden Crate</option>
+                  <option value="prop_box_wood02a">prop_box_wood02a - Market Goods Storage Box</option>
+                  <option value="prop_food_van_01">prop_food_van_01 - Mobile Street Food Cart / Van</option>
+                  <option value="prop_vend_coffe_01">prop_vend_coffe_01 - Street Coffee Kiosk Stand</option>
+                  <option value="prop_Barrel_02a">prop_Barrel_02a - Market Stand Barrel</option>
+                  <option value="prop_dumpster_01a">prop_dumpster_01a - Market Service Dumpster</option>
+                  <option value="prop_bench_01a">prop_bench_01a - Wooden Market Plaza Bench</option>
+                </optgroup>
+                <optgroup label="🚌 6. Outside Road, Bus Stop & Transit Plaza">
+                  <option value="prop_busstop_02">prop_busstop_02 - Glass Bus Stop Shelter</option>
+                  <option value="prop_busstop_04">prop_busstop_04 - Transit Stop Sign &amp; Canopy</option>
+                  <option value="prop_streetlight_01">prop_streetlight_01 - Tall Street / Platform Lamp Post</option>
+                  <option value="prop_traffic_01a">prop_traffic_01a - Road Intersection Traffic Light</option>
+                  <option value="prop_Wait_Bench_01">prop_Wait_Bench_01 - Roadside Transit Waiting Bench</option>
+                  <option value="prop_barrier_work05">prop_barrier_work05 - Pedestrian Crowd Control Barrier</option>
+                  <option value="prop_mp_barrier_02b">prop_mp_barrier_02b - Heavy Road Lane Separator</option>
+                  <option value="prop_bin_01a">prop_bin_01a - Street Sidewalk Trash Bin</option>
+                </optgroup>
+              </select>
+            </div>
+
+            <div style="margin-bottom:10px;">
+              <label style="font-size:11px; color:#94a3b8; display:block; margin-bottom:4px;">Or Custom GTA V Model Name:</label>
+              <input type="text" id="txt-custom-model" placeholder="e.g. prop_gate_bridge_ld, prop_gazebo_02, prop_busstop_02" style="width:100%; padding:6px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px; font-size:12px;" />
+            </div>
+
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+              <label style="font-size:12px; color:#f8fafc; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" id="chk-snap-surface" checked />
+                <span>Snap to Ground / Surface (Raycast on terrain &amp; stacked props)</span>
+              </label>
+            </div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+              <button class="tool-btn" id="btn-spawn-in-front" style="background:#0284c7; color:#fff; padding:8px; font-weight:600; border-radius:4px;">🎯 Spawn In Front of Me (3.5m)</button>
+              <button class="tool-btn" id="btn-spawn-at-player" style="background:#0d9488; color:#fff; padding:8px; font-weight:600; border-radius:4px;">🧍 Spawn At My Position</button>
+            </div>
+          </div>
+
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #1e293b;">
+            <div style="font-weight:600; font-size:13px; color:#e2e8f0; margin-bottom:6px;">📍 Coordinates &amp; Offset (Optional)</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:6px; font-size:11px;">
+              <div>
+                <label style="color:#94a3b8;">X:</label>
+                <input type="number" id="num-spawn-x" step="0.5" placeholder="Auto" style="width:100%; padding:5px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px;" />
+              </div>
+              <div>
+                <label style="color:#94a3b8;">Y:</label>
+                <input type="number" id="num-spawn-y" step="0.5" placeholder="Auto" style="width:100%; padding:5px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px;" />
+              </div>
+              <div>
+                <label style="color:#94a3b8;">Z (Height):</label>
+                <input type="number" id="num-spawn-z" step="0.5" placeholder="Auto" style="width:100%; padding:5px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px;" />
+              </div>
+              <div>
+                <label style="color:#94a3b8;">Heading (°):</label>
+                <input type="number" id="num-spawn-head" step="15" placeholder="0" style="width:100%; padding:5px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px;" />
+              </div>
+            </div>
+            <button class="tool-btn" id="btn-spawn-exact-coords" style="width:100%; margin-top:8px; background:#475569; color:#fff; padding:6px;">Spawn At Exact Coordinates</button>
+          </div>
+        </div>
+
+        <!-- TAB 2: LIVE NUDGE & TRANSFORM -->
+        <div id="prop-tab-transform" style="display:none;">
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #1e293b; margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <div style="font-weight:600; font-size:13px; color:#38bdf8;">🎯 Selected Prop For Live Nudge &amp; Smart Clone</div>
+              <button class="tool-btn" id="btn-refresh-selected-prop" style="font-size:11px; padding:3px 8px;">🔄 Refresh Info</button>
+            </div>
+
+            <div id="card-selected-prop" style="background:#1e293b; padding:10px; border-radius:4px; font-size:12px; margin-bottom:12px;">
+              <div style="color:#94a3b8; font-style:italic;">No prop selected. Click a prop in "Placed Props" or spawn a new one to select it.</div>
+            </div>
+
+            <!-- Edge-to-Edge Smart Cloning -->
+            <div style="background:#1e293b; padding:9px 10px; border-radius:6px; border:1px solid #334155; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+              <div style="font-size:11px; color:#cbd5e1;">
+                <strong style="color:#38bdf8;">🧬 Edge-to-Edge Smart Clone:</strong> Tile walls, fences, bridges &amp; market stalls using exact model dimensions
+              </div>
+              <div style="display:flex; gap:6px;">
+                <button class="tool-btn" id="btn-clone-prop-len" style="background:#0d9488; color:#fff; font-size:11px; padding:5px 10px; font-weight:600;">➕ Clone End-to-End (Y)</button>
+                <button class="tool-btn" id="btn-clone-prop-side" style="background:#7c3aed; color:#fff; font-size:11px; padding:5px 10px; font-weight:600;">➕ Clone Side-by-Side (X)</button>
+              </div>
+            </div>
+
+            <!-- Nudge Step Size -->
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+              <span style="font-size:11px; color:#94a3b8; font-weight:600;">Nudge Step:</span>
+              <button class="tool-btn step-btn" data-step="0.1" style="font-size:11px; padding:3px 8px;">0.1m</button>
+              <button class="tool-btn step-btn active" data-step="0.5" style="font-size:11px; padding:3px 8px; background:#0284c7; color:#fff;">0.5m</button>
+              <button class="tool-btn step-btn" data-step="1.0" style="font-size:11px; padding:3px 8px;">1.0m</button>
+              <button class="tool-btn step-btn" data-step="3.0" style="font-size:11px; padding:3px 8px;">3.0m</button>
+            </div>
+
+            <!-- Directional Nudge Pad -->
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
+              <!-- Horizontal XY Pad -->
+              <div style="background:#1e293b; padding:10px; border-radius:6px; text-align:center;">
+                <div style="font-size:11px; color:#94a3b8; font-weight:600; margin-bottom:8px;">Horizontal Movement (X / Y)</div>
+                <div style="display:grid; grid-template-columns: 50px 50px 50px; gap:6px; justify-content:center; align-items:center;">
+                  <div></div>
+                  <button class="tool-btn nudge-btn" data-action="pos_y_plus" style="padding:8px 0; font-weight:700;">⬆️ +Y</button>
+                  <div></div>
+                  <button class="tool-btn nudge-btn" data-action="pos_x_minus" style="padding:8px 0; font-weight:700;">⬅️ -X</button>
+                  <div style="font-size:11px; color:#64748b;">XY</div>
+                  <button class="tool-btn nudge-btn" data-action="pos_x_plus" style="padding:8px 0; font-weight:700;">➡️ +X</button>
+                  <div></div>
+                  <button class="tool-btn nudge-btn" data-action="pos_y_minus" style="padding:8px 0; font-weight:700;">⬇️ -Y</button>
+                  <div></div>
+                </div>
+              </div>
+
+              <!-- Vertical Z & Rotation Pad -->
+              <div style="background:#1e293b; padding:10px; border-radius:6px; text-align:center;">
+                <div style="font-size:11px; color:#94a3b8; font-weight:600; margin-bottom:8px;">Altitude (Z), Heading &amp; Pitch</div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:6px;">
+                  <button class="tool-btn nudge-btn" data-action="pos_z_plus" style="padding:8px; font-weight:700; background:#047857; color:#fff;">⏫ Raise (+Z)</button>
+                  <button class="tool-btn nudge-btn" data-action="pos_z_minus" style="padding:8px; font-weight:700; background:#b45309; color:#fff;">⏬ Lower (-Z)</button>
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:6px;">
+                  <button class="tool-btn nudge-btn" data-action="rot_minus_15" style="padding:6px; font-size:11px;">↺ -15°</button>
+                  <button class="tool-btn nudge-btn" data-action="rot_plus_15" style="padding:6px; font-size:11px;">↻ +15°</button>
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:4px;">
+                  <button class="tool-btn nudge-btn" data-action="rot_minus_90" style="padding:5px; font-size:10px;">↺ -90°</button>
+                  <button class="tool-btn nudge-btn" data-action="rot_plus_90" style="padding:5px; font-size:10px;">↻ +90°</button>
+                  <button class="tool-btn nudge-btn" data-action="pitch_minus_5" style="padding:5px; font-size:10px;">📐 -5°</button>
+                  <button class="tool-btn nudge-btn" data-action="pitch_plus_5" style="padding:5px; font-size:10px;">📐 +5°</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Snap to Surface & Delete -->
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+              <button class="tool-btn nudge-btn" data-action="snap_surface" style="background:#0284c7; color:#fff; padding:8px; font-weight:600;">📍 Snap To Ground/Surface</button>
+              <button class="tool-btn" id="btn-delete-selected-prop" style="background:#be123c; color:#fff; padding:8px; font-weight:600;">🗑️ Delete Selected Prop</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3: PLACED PROPS LIST -->
+        <div id="prop-tab-propslist" style="display:none;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <div style="font-size:12px; color:#94a3b8;">Click any prop below to select it for live transformation / nudging:</div>
+            <button class="tool-btn" id="btn-refresh-all-props" style="font-size:11px; padding:4px 8px;">🔄 Refresh All</button>
+          </div>
+          <div id="container-props-list" style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:4px;">
+            <div style="color:#64748b; font-size:12px; font-style:italic; padding:10px;">Loading props list...</div>
+          </div>
+        </div>
+
+        <!-- TAB 4: LAYOUTS & PRESETS -->
+        <div id="prop-tab-presets" style="display:none;">
+          <!-- NSRD Blueprint 1-Click Spawn -->
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #14b8a6; margin-bottom:12px;">
+            <div style="font-weight:700; font-size:14px; color:#2dd4bf; margin-bottom:4px;">🏛️ Complete 4-Zone LSIA Station &amp; Street Market Blueprint</div>
+            <div style="font-size:11px; color:#94a3b8; margin-bottom:10px;">
+              Spawns all 4 architectural zones: (1) Platform 1 &amp; 2 with canopies, benches &amp; lamp posts, (2) Elevated Foot Over Bridge (FOB) with wide dual staircases, (3) Concourse Entrance/Exit Room with ticket booth, vending kiosks &amp; turnstile line (NSRD-ENT-LINE-01), and (4) Simulated Outside Street Market &amp; Bus Transit Road Plaza.
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="tool-btn" id="btn-spawn-nsrd-blueprint" style="background:#0f766e; color:#fff; padding:8px 14px; font-weight:600; border-radius:4px;">🚀 Spawn Full Station + Market Layout</button>
+              <button class="tool-btn" id="btn-teleport-to-station" style="background:#1e293b; color:#38bdf8; border-color:#38bdf8; padding:8px 14px;">👁️ Teleport to Concourse Hall</button>
+            </div>
+          </div>
+
+          <!-- Save Current Layout / Composite Entity -->
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #10b981; margin-bottom:12px;">
+            <div style="font-weight:600; font-size:13px; color:#34d399; margin-bottom:6px;">💾 Save &amp; Lock Placed Props as a Single Composite Entity</div>
+            <div style="display:flex; gap:8px; margin-bottom:6px;">
+              <input type="text" id="txt-save-layout-name" value="Custom_Station_Entity" placeholder="Entity / Layout Name (e.g. Custom_Station_Entity)" style="flex:1; padding:6px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px; font-size:12px;" />
+              <button class="tool-btn" id="btn-save-layout" style="background:#16a34a; color:#fff; padding:6px 14px; font-weight:600;">💾 Save &amp; Lock Entity</button>
+            </div>
+            <div style="font-size:10px; color:#6ee7b7;">
+              Persists all currently placed props in GTA V world + saves the whole multi-prop assembly as 1 spawnable entity (.json + Menyoo .xml).
+            </div>
+          </div>
+
+          <!-- Load Layout / Spawn Composite Entity (JSON or Menyoo XML) -->
+          <div style="background:#0f172a; padding:12px; border-radius:6px; border:1px solid #1e293b; margin-bottom:12px;">
+            <div style="font-weight:600; font-size:13px; color:#f8fafc; margin-bottom:6px;">📂 Spawn Saved Composite Entity / Layout (.json or Menyoo .xml)</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <select id="sel-saved-layouts" style="flex:1; min-width:200px; padding:6px; background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:4px; font-size:12px;">
+                <option value="">(No saved layouts found)</option>
+              </select>
+              <button class="tool-btn" id="btn-load-layout" style="background:#7c3aed; color:#fff; padding:6px 12px; font-weight:600;" title="Spawn at original saved world coordinates">📍 Spawn at Saved Coords</button>
+              <button class="tool-btn" id="btn-modal-spawn-entity-here" style="background:#0284c7; color:#fff; padding:6px 12px; font-weight:600;" title="Spawn the entire multi-prop assembly right in front of player as a single unit">🧍 Spawn Here (As 1 Entity)</button>
+            </div>
+            <div style="font-size:10px; color:#64748b; margin-top:5px;">
+              💡 Drop any CrowdSim <code>.json</code> or Menyoo Object Spooner <code>.xml</code> file into <code>experiments/station_layouts/</code> to spawn it as a whole entity anywhere!
+            </div>
+          </div>
+
+          <!-- Clear All -->
+          <div style="text-align:right;">
+            <button class="tool-btn" id="btn-clear-all-station-props" style="background:#991b1b; color:#fff; padding:6px 14px;">🧹 Clear All Custom Props From Game</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
   <script>
+    // =========================================================================
+    // PROP STUDIO GLOBAL CONTROLLERS
+    // =========================================================================
+    window.openPropStudio = function() {
+      const modal = document.getElementById('modal-prop-studio');
+      if (modal) {
+        modal.classList.add('open');
+        if (typeof window.fetchAllProps === 'function') window.fetchAllProps();
+        if (typeof window.loadSavedLayoutsList === 'function') window.loadSavedLayoutsList();
+      } else {
+        console.error('[PROP_STUDIO] modal-prop-studio element not found!');
+      }
+    };
+
+    window.closePropStudio = function() {
+      const modal = document.getElementById('modal-prop-studio');
+      if (modal) modal.classList.remove('open');
+    };
+
+    
+    /* =========================================================================
+       FLY MODE & CUSTOM STATION BUILDER CONTROLS
+       ========================================================================= */
+    let isFlyModeActive = false;
+    const btnToggleFly = document.getElementById('btn-toggle-fly');
+    if (btnToggleFly) {
+      btnToggleFly.addEventListener('click', async () => {
+        isFlyModeActive = !isFlyModeActive;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'TOGGLE_NOCLIP',
+              payload: { enabled: isFlyModeActive }
+            })
+          });
+          btnToggleFly.textContent = isFlyModeActive ? '🦅 Fly: ON (F6)' : '🦅 Fly: OFF';
+          btnToggleFly.classList.toggle('active', isFlyModeActive);
+          showToast(isFlyModeActive ? '🦅 Fly Mode ON (W/A/S/D to fly, Space: UP, Shift: DOWN, Tab: Fast)' : '🦅 Fly Mode OFF');
+        } catch (e) {
+          showToast('Failed to toggle fly mode: ' + e.message);
+        }
+      });
+    }
+
+        // GOD MODE & NEVER WANTED CONTROLS
+    let isGodModeActive = true;
+    const btnToggleGod = document.getElementById('btn-toggle-god');
+    if (btnToggleGod) {
+      btnToggleGod.addEventListener('click', async () => {
+        isGodModeActive = !isGodModeActive;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'TOGGLE_GOD_MODE',
+              payload: { enabled: isGodModeActive }
+            })
+          });
+          btnToggleGod.textContent = isGodModeActive ? '🛡️ God Mode: ON' : '🛡️ God Mode: OFF';
+          btnToggleGod.classList.toggle('active', isGodModeActive);
+          btnToggleGod.style.background = isGodModeActive ? '#15803d' : '#334155';
+          btnToggleGod.style.borderColor = isGodModeActive ? '#22c55e' : '#475569';
+          showToast(isGodModeActive ? '🛡️ God Mode ON (Player is 100% Invincible, No Fall Damage)' : '⚠️ God Mode OFF');
+        } catch (e) {
+          showToast('Failed to toggle god mode: ' + e.message);
+        }
+      });
+    }
+
+    const btnClearWanted = document.getElementById('btn-clear-wanted');
+    if (btnClearWanted) {
+      btnClearWanted.addEventListener('click', async () => {
+        try {
+          showToast('⭐ Clearing Wanted Level & Suppressing Police...');
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'CLEAR_WANTED_LEVEL',
+              payload: {}
+            })
+          });
+          showToast('✅ Wanted Level Cleared! Police response suppressed.');
+        } catch (e) {
+          showToast('Failed to clear wanted level: ' + e.message);
+        }
+      });
+    }
+
+    let isNeverWantedActive = true;
+    const btnToggleNeverWanted = document.getElementById('btn-toggle-never-wanted');
+    if (btnToggleNeverWanted) {
+      btnToggleNeverWanted.addEventListener('click', async () => {
+        isNeverWantedActive = !isNeverWantedActive;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'TOGGLE_NEVER_WANTED',
+              payload: { enabled: isNeverWantedActive }
+            })
+          });
+          btnToggleNeverWanted.textContent = isNeverWantedActive ? '🚫 Never Wanted: ON' : '🚫 Never Wanted: OFF';
+          btnToggleNeverWanted.classList.toggle('active', isNeverWantedActive);
+          btnToggleNeverWanted.style.background = isNeverWantedActive ? '#0284c7' : '#334155';
+          btnToggleNeverWanted.style.borderColor = isNeverWantedActive ? '#38bdf8' : '#475569';
+          showToast(isNeverWantedActive ? '🚫 Never Wanted ON (0 Stars permanently locked)' : '⚠️ Never Wanted OFF');
+        } catch (e) {
+          showToast('Failed to toggle never wanted: ' + e.message);
+        }
+      });
+    }
+
+    // IN-GAME 3D PROP BUILDER (MENYOO SPOONER) TOGGLE
+    let is3dBuilderActive = false;
+    const btnToggle3dBuilder = document.getElementById('btn-toggle-3d-builder');
+    const btnStudioToggle3dBuilder = document.getElementById('btn-studio-toggle-3d-builder');
+    async function toggleInGame3dBuilder() {
+      is3dBuilderActive = !is3dBuilderActive;
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            command: 'TOGGLE_PROP_BUILDER',
+            payload: { enabled: is3dBuilderActive }
+          })
+        });
+        const data = await res.json();
+        const g = data.game_response || data;
+        if (g.enabled !== undefined) is3dBuilderActive = g.enabled;
+        if (btnToggle3dBuilder) {
+          btnToggle3dBuilder.textContent = is3dBuilderActive ? '🎮 3D Builder: ON (F9)' : '🎮 3D Builder (F9)';
+          btnToggle3dBuilder.classList.toggle('active', is3dBuilderActive);
+          btnToggle3dBuilder.style.background = is3dBuilderActive ? '#16a34a' : '#7c3aed';
+        }
+        showToast(is3dBuilderActive
+          ? '🎮 In-Game 3D Prop Builder ON! Aim in GTA V, Left Click/Enter to Place, C to Clone, Right Click/Backspace to Grab.'
+          : '🎮 In-Game 3D Prop Builder OFF');
+      } catch (e) {
+        showToast('Failed to toggle 3D Builder: ' + e.message, true);
+      }
+    }
+    if (btnToggle3dBuilder) btnToggle3dBuilder.addEventListener('click', toggleInGame3dBuilder);
+    if (btnStudioToggle3dBuilder) btnStudioToggle3dBuilder.addEventListener('click', toggleInGame3dBuilder);
+
+    const btnBuildStation = document.getElementById('btn-build-station');
+    if (btnBuildStation) {
+      btnBuildStation.addEventListener('click', async () => {
+        showToast('🏛️ Spawning Complete 4-Zone LSIA Station, Overbridge, Entrance Hall & Street Market...');
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'BUILD_CUSTOM_STATION',
+              payload: { x: -1340.0, y: -3040.0, z: 13.95 }
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (res.ok && g.status !== 'ERROR') {
+            showToast(`✅ 4-Zone Station + Market Built! ${g.props_built || 66} props spawned (Platforms, FOB, Dual Stairs, Entrance Room, Turnstiles & Market).`);
+            if (typeof window.fetchAllProps === 'function') window.fetchAllProps();
+
+            // Set up or update active group with full 4-Zone Station -> Overbridge -> Entrance Hall -> Turnstiles -> Market -> Road route
+            const grp = state.groups.find(gr => gr.id === state.selectedGroupId) || state.groups[0];
+            if (grp) {
+              grp.name = 'Station -> Market Commuters';
+              grp.count = 80;
+              grp.spawnRate = 12;
+              grp.speed = 1.5;
+              grp.behavior = 'ROUTE_TRAVEL';
+              grp.arrivalBehavior = 'DESPAWN_AT_DEST';
+              grp.continuousStream = true;
+
+              const pOrig = { id: 'pt_st_orig', name: 'Platform 2 (Train Arrival)', x: -1344.0, y: -3032.0 };
+              const pVia1 = { id: 'pt_st_v1', name: 'North FOB Stairs Base', x: -1336.0, y: -3034.5 };
+              const pVia2 = { id: 'pt_st_v2', name: 'Foot Over Bridge (FOB Z=17.8)', x: -1336.0, y: -3040.0 };
+              const pVia3 = { id: 'pt_st_v3', name: 'South FOB Stairs Base', x: -1336.0, y: -3046.5 };
+              const pVia4 = { id: 'pt_st_v4', name: 'Concourse Entrance/Exit Room', x: -1334.0, y: -3053.5 };
+              const pVia5 = { id: 'pt_st_v5', name: 'Turnstile Gate Line (Line-01)', x: -1334.0, y: -3058.5 };
+              const pDest = { id: 'pt_st_dest', name: 'Outside Street Market Plaza', x: -1334.0, y: -3066.0 };
+              const pDespawn = { id: 'pt_st_dsp', name: 'Outside Transit Road & Bus Stop', x: -1334.0, y: -3074.0 };
+
+              [pOrig, pVia1, pVia2, pVia3, pVia4, pVia5, pDest, pDespawn].forEach(p => {
+                const existing = state.savedPoints.find(sp => sp.id === p.id);
+                if (!existing) state.savedPoints.push(p);
+                else { existing.x = p.x; existing.y = p.y; existing.name = p.name; }
+              });
+
+              grp.originPointId = pOrig.id;
+              grp.originRadius = 6.0;
+              grp.destinationPointId = pDest.id;
+              grp.destinationRadius = 8.0;
+              grp.despawnCheckpointEnabled = true;
+              grp.despawnPointId = pDespawn.id;
+              grp.despawnRadius = 10.0;
+              grp.waypoints = [
+                { pointId: pVia1.id, x: pVia1.x, y: pVia1.y },
+                { pointId: pVia2.id, x: pVia2.x, y: pVia2.y },
+                { pointId: pVia3.id, x: pVia3.x, y: pVia3.y },
+                { pointId: pVia4.id, x: pVia4.x, y: pVia4.y },
+                { pointId: pVia5.id, x: pVia5.x, y: pVia5.y }
+              ];
+
+              // Center experiment boundary around LSIA Station & Market
+              state.experiment.name = 'LSIA Station & Street Market Simulation';
+              state.experiment.centerX = -1335.0;
+              state.experiment.centerY = -3052.0;
+              state.experiment.width = 140;
+              state.experiment.height = 120;
+
+              populatePointDropdowns();
+              renderSavedPointsList();
+              syncActiveGroupUI();
+              syncGroup(grp);
+              drawMap();
+            }
+
+            // Teleport player to Concourse Entrance/Exit Room overlooking Turnstiles & Market
+            teleportPlayerTo(-1334.0, -3054.0, 14.5);
+          } else {
+            showToast('Failed to build station: ' + (g.error || data.error || 'Unknown error'), true);
+          }
+        } catch (e) {
+          showToast('Error building station: ' + e.message, true);
+        }
+      });
+    }
+
+    const btnClearStation = document.getElementById('btn-clear-station');
+    if (btnClearStation) {
+      btnClearStation.addEventListener('click', async () => {
+        showToast('🧹 Clearing Custom Station & Market Props...');
+        try {
+          await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'CLEAR_CUSTOM_STATION', payload: {} })
+          });
+          state.stationProps = [];
+          drawMap();
+          showToast('Cleared all custom station & market props.');
+        } catch (e) {
+          showToast('Failed to clear station: ' + e.message, true);
+        }
+      });
+    }
+
+    // =========================================================================
+    // PROP PLACER & STATION DESIGNER STUDIO JAVASCRIPT
+    // =========================================================================
+    (function initPropStudio() {
+      let activeProp = null; // { id, model, label, zone, x, y, z, heading, pitch, roll, width, length, height }
+      let nudgeStep = 0.5;
+      let cachedPropsList = [];
+
+      const modal = document.getElementById('modal-prop-studio');
+      const btnOpen = document.getElementById('btn-open-prop-studio');
+      const btnClose = document.getElementById('btn-close-prop-studio');
+
+      if (!modal || !btnOpen) return;
+
+      btnOpen.addEventListener('click', () => {
+        modal.classList.add('open');
+        fetchAllProps();
+        loadSavedLayoutsList();
+      });
+
+      btnClose?.addEventListener('click', () => {
+        modal.classList.remove('open');
+      });
+
+      // Sub-Tabs navigation
+      const tabs = [
+        { btn: document.getElementById('tab-btn-spawn'), pane: document.getElementById('prop-tab-spawn') },
+        { btn: document.getElementById('tab-btn-transform'), pane: document.getElementById('prop-tab-transform') },
+        { btn: document.getElementById('tab-btn-propslist'), pane: document.getElementById('prop-tab-propslist') },
+        { btn: document.getElementById('tab-btn-presets'), pane: document.getElementById('prop-tab-presets') }
+      ];
+
+      function switchTab(targetBtn) {
+        tabs.forEach(t => {
+          if (t.btn && t.pane) {
+            const isActive = t.btn === targetBtn;
+            t.btn.classList.toggle('active', isActive);
+            t.pane.style.display = isActive ? 'block' : 'none';
+          }
+        });
+      }
+
+      tabs.forEach(t => {
+        if (t.btn) {
+          t.btn.addEventListener('click', () => switchTab(t.btn));
+        }
+      });
+
+      // Step Buttons
+      document.querySelectorAll('.step-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.step-btn').forEach(b => {
+            b.classList.remove('active');
+            b.style.background = '';
+            b.style.color = '';
+          });
+          btn.classList.add('active');
+          btn.style.background = '#0284c7';
+          btn.style.color = '#fff';
+          nudgeStep = parseFloat(btn.dataset.step) || 0.5;
+        });
+      });
+
+      // Get Active Model Choice
+      function getChosenModel() {
+        const customTxt = document.getElementById('txt-custom-model')?.value.trim();
+        if (customTxt) return customTxt;
+        const sel = document.getElementById('sel-prop-catalog');
+        return sel ? sel.value : 'prop_portacabin01';
+      }
+
+      // 1. Spawn Handlers
+      async function executeSpawnProp(payload) {
+        showToast(`📦 Spawning prop ${payload.model}...`);
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'SPAWN_PROP',
+              payload: payload
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK' && g.prop) {
+            activeProp = g.prop;
+            showToast(`✅ Spawned ${activeProp.model} [ID: ${activeProp.id}]!`);
+            updateSelectedPropCard();
+            fetchAllProps();
+            switchTab(document.getElementById('tab-btn-transform'));
+          } else {
+            showToast(`❌ Spawn failed: ${g.message || data.error || JSON.stringify(g)}`, true);
+          }
+        } catch (ex) {
+          showToast(`❌ Network error: ${ex.message}`, true);
+        }
+      }
+
+      document.getElementById('btn-spawn-in-front')?.addEventListener('click', () => {
+        const model = getChosenModel();
+        const snap = document.getElementById('chk-snap-surface')?.checked ?? true;
+        executeSpawnProp({ model: model, snap_surface: snap });
+      });
+
+      document.getElementById('btn-spawn-at-player')?.addEventListener('click', () => {
+        const model = getChosenModel();
+        const snap = document.getElementById('chk-snap-surface')?.checked ?? true;
+        if (state.player && state.player.x !== undefined && state.player.x !== null) {
+          executeSpawnProp({
+            model: model,
+            x: state.player.x,
+            y: state.player.y,
+            z: state.player.z,
+            heading: state.player.heading || 0,
+            snap_surface: snap
+          });
+        } else {
+          executeSpawnProp({ model: model, snap_surface: snap });
+        }
+      });
+
+      document.getElementById('btn-spawn-exact-coords')?.addEventListener('click', () => {
+        const model = getChosenModel();
+        const px = parseFloat(document.getElementById('num-spawn-x')?.value);
+        const py = parseFloat(document.getElementById('num-spawn-y')?.value);
+        const pz = parseFloat(document.getElementById('num-spawn-z')?.value);
+        const phead = parseFloat(document.getElementById('num-spawn-head')?.value) || 0;
+        const snap = document.getElementById('chk-snap-surface')?.checked ?? true;
+
+        const payload = { model: model, heading: phead, snap_surface: snap };
+        if (!isNaN(px) && !isNaN(py) && !isNaN(pz)) {
+          payload.x = px;
+          payload.y = py;
+          payload.z = pz;
+        }
+        executeSpawnProp(payload);
+      });
+
+      // 2. Live Nudge, Smart Clone & Transform
+      function updateSelectedPropCard() {
+        const card = document.getElementById('card-selected-prop');
+        if (!card) return;
+        if (!activeProp) {
+          card.innerHTML = `<div style="color:#94a3b8; font-style:italic;">No prop selected. Click a prop in "Placed Props" or spawn a new one to select it.</div>`;
+          return;
+        }
+        const pitchVal = activeProp.pitch || 0;
+        const dimTxt = (activeProp.width && activeProp.length)
+          ? ` | Size: ${activeProp.width.toFixed(1)}x${activeProp.length.toFixed(1)}x${(activeProp.height || 1).toFixed(1)}m`
+          : '';
+        card.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <div>
+              <span style="font-weight:700; color:#38bdf8; font-size:13px;">${activeProp.label || activeProp.model}</span>
+              <span style="color:#94a3b8; font-size:11px; margin-left:6px;">(${activeProp.model}${dimTxt})</span>
+            </div>
+            <div style="background:#0369a1; color:#fff; font-size:10px; padding:2px 6px; border-radius:3px;">ID: ${activeProp.id}</div>
+          </div>
+          <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap:6px; font-family:monospace; font-size:11px; color:#cbd5e1;">
+            <div>X: <b>${activeProp.x.toFixed(2)}</b></div>
+            <div>Y: <b>${activeProp.y.toFixed(2)}</b></div>
+            <div>Z: <b>${activeProp.z.toFixed(2)}</b></div>
+            <div>Head: <b>${activeProp.heading.toFixed(1)}°</b></div>
+            <div>Pitch: <b>${pitchVal.toFixed(1)}°</b></div>
+          </div>
+        `;
+      }
+
+      async function executeCloneProp(sideAxis) {
+        if (!activeProp) {
+          showToast('⚠️ Select a prop first to clone it edge-to-edge!');
+          return;
+        }
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'CLONE_PROP',
+              payload: { id: activeProp.id, side_axis: sideAxis }
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK' && g.prop) {
+            activeProp = g.prop;
+            showToast(`🧬 Cloned ${activeProp.model} -> New ID #${activeProp.id}!`);
+            updateSelectedPropCard();
+            fetchAllProps();
+          } else {
+            showToast(`❌ Clone failed: ${g.message || data.error || 'Error'}`, true);
+          }
+        } catch (ex) {
+          showToast(`❌ Clone error: ${ex.message}`, true);
+        }
+      }
+
+      document.getElementById('btn-clone-prop-len')?.addEventListener('click', () => executeCloneProp(false));
+      document.getElementById('btn-clone-prop-side')?.addEventListener('click', () => executeCloneProp(true));
+
+      async function executeUpdateProp(payload) {
+        if (!activeProp) {
+          showToast('⚠️ No prop selected!');
+          return;
+        }
+        payload.id = activeProp.id;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'UPDATE_PROP',
+              payload: payload
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK' && g.prop) {
+            activeProp = g.prop;
+            updateSelectedPropCard();
+            fetchAllProps();
+          }
+        } catch (ex) {
+          console.error('[PROP_UPDATE]', ex);
+        }
+      }
+
+      document.querySelectorAll('.nudge-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (!activeProp) {
+            showToast('⚠️ Select a prop first to nudge it!');
+            return;
+          }
+          const act = btn.dataset.action;
+          let newX = activeProp.x;
+          let newY = activeProp.y;
+          let newZ = activeProp.z;
+          let newHead = activeProp.heading;
+          let newPitch = activeProp.pitch || 0;
+          let snap = false;
+
+          switch (act) {
+            case 'pos_x_plus': newX += nudgeStep; break;
+            case 'pos_x_minus': newX -= nudgeStep; break;
+            case 'pos_y_plus': newY += nudgeStep; break;
+            case 'pos_y_minus': newY -= nudgeStep; break;
+            case 'pos_z_plus': newZ += nudgeStep; break;
+            case 'pos_z_minus': newZ -= nudgeStep; break;
+            case 'rot_plus_15': newHead = (newHead + 15) % 360; break;
+            case 'rot_minus_15': newHead = (newHead - 15 + 360) % 360; break;
+            case 'rot_plus_90': newHead = (newHead + 90) % 360; break;
+            case 'rot_minus_90': newHead = (newHead - 90 + 360) % 360; break;
+            case 'pitch_plus_5': newPitch = Math.min(60, newPitch + 5); break;
+            case 'pitch_minus_5': newPitch = Math.max(-60, newPitch - 5); break;
+            case 'snap_surface': snap = true; break;
+          }
+
+          executeUpdateProp({ x: newX, y: newY, z: newZ, heading: newHead, pitch: newPitch, snap_surface: snap });
+        });
+      });
+
+      document.getElementById('btn-delete-selected-prop')?.addEventListener('click', async () => {
+        if (!activeProp) return;
+        const delId = activeProp.id;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'DELETE_PROP',
+              payload: { id: delId }
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK') {
+            showToast(`🗑️ Deleted prop [ID: ${delId}]`);
+            activeProp = null;
+            updateSelectedPropCard();
+            fetchAllProps();
+          }
+        } catch (ex) {
+          showToast(`❌ Delete failed: ${ex.message}`, true);
+        }
+      });
+
+      // 3. Placed Props List, Undo Prop, Delete Prop & Sidebar Prop Manager
+      window.fetchAllProps = fetchAllProps;
+      window.loadSavedLayoutsList = loadSavedLayoutsList;
+      window.undoLastProp = undoLastProp;
+      window.deleteNearestProp = deleteNearestProp;
+      window.deletePropById = deletePropById;
+      window.clearAllManagedProps = clearAllManagedProps;
+      window.selectPropForStudioEdit = selectPropForStudioEdit;
+      window.syncLivePropsFromTelemetry = syncLivePropsFromTelemetry;
+
+      let lastPropsSig = '';
+      function syncLivePropsFromTelemetry(propsArr) {
+        if (!Array.isArray(propsArr)) return;
+        const sig = propsArr.map(p => `${p.id}:${p.x}:${p.y}:${p.z}:${p.heading}`).join('|');
+        if (sig !== lastPropsSig) {
+          lastPropsSig = sig;
+          cachedPropsList = propsArr;
+          if (activeProp) {
+            const updatedActive = cachedPropsList.find(p => p.id === activeProp.id);
+            activeProp = updatedActive || null;
+            updateSelectedPropCard();
+          }
+          renderPropsList();
+        }
+      }
+
+      async function deletePropById(delId) {
+        if (!delId) return;
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'DELETE_PROP',
+              payload: { id: delId }
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK') {
+            showToast(`🗑️ Deleted ${g.deleted_model || 'prop'} [ID: ${delId}]`);
+            if (activeProp && activeProp.id === delId) {
+              activeProp = null;
+              updateSelectedPropCard();
+            }
+            if (Array.isArray(g.props)) {
+              cachedPropsList = g.props;
+              state.stationProps = g.props;
+              renderPropsList();
+              drawMap();
+            } else {
+              fetchAllProps();
+            }
+          }
+        } catch (ex) {
+          showToast(`❌ Delete failed: ${ex.message}`, true);
+        }
+      }
+
+      async function undoLastProp() {
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'UNDO_PROP', payload: {} })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK') {
+            showToast(`↩ Undid last prop: ${g.deleted_model || 'Prop'} [ID: ${g.deleted_id}]`);
+            if (activeProp && activeProp.id === g.deleted_id) {
+              activeProp = null;
+              updateSelectedPropCard();
+            }
+            if (Array.isArray(g.props)) {
+              cachedPropsList = g.props;
+              state.stationProps = g.props;
+              renderPropsList();
+              drawMap();
+            } else {
+              fetchAllProps();
+            }
+          } else {
+            showToast(`⚠️ ${g.message || 'No placed props left to undo.'}`, true);
+          }
+        } catch (ex) {
+          showToast(`❌ Undo error: ${ex.message}`, true);
+        }
+      }
+
+      async function deleteNearestProp() {
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'DELETE_NEAREST_PROP', payload: { radius: 60.0 } })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK') {
+            showToast(`🎯 Deleted nearest prop: ${g.deleted_model} [ID: ${g.deleted_id}] (${g.distance}m away)`);
+            if (activeProp && activeProp.id === g.deleted_id) {
+              activeProp = null;
+              updateSelectedPropCard();
+            }
+            if (Array.isArray(g.props)) {
+              cachedPropsList = g.props;
+              state.stationProps = g.props;
+              renderPropsList();
+              drawMap();
+            } else {
+              fetchAllProps();
+            }
+          } else {
+            showToast(`⚠️ ${g.message || 'No prop found near player.'}`, true);
+          }
+        } catch (ex) {
+          showToast(`❌ Delete nearest error: ${ex.message}`, true);
+        }
+      }
+
+      async function clearAllManagedProps() {
+        try {
+          await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'CLEAR_ALL_PROPS', payload: {} })
+          });
+          showToast('🧹 Cleared all placed props from world!');
+          activeProp = null;
+          cachedPropsList = [];
+          state.stationProps = [];
+          updateSelectedPropCard();
+          renderPropsList();
+          drawMap();
+        } catch (ex) {
+          showToast(`❌ Clear failed: ${ex.message}`, true);
+        }
+      }
+
+      function selectPropForStudioEdit(id) {
+        const found = cachedPropsList.find(p => p.id === id);
+        if (found) {
+          activeProp = found;
+          updateSelectedPropCard();
+          renderPropsList();
+          modal.classList.add('open');
+          switchTab(document.getElementById('tab-btn-transform'));
+        }
+      }
+
+      async function fetchAllProps() {
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'GET_ALL_PROPS', payload: {} })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK' && Array.isArray(g.props)) {
+            cachedPropsList = g.props;
+            state.stationProps = g.props;
+            renderPropsList();
+            drawMap();
+          }
+        } catch (ex) {
+          console.error('[FETCH_PROPS]', ex);
+        }
+      }
+
+      function renderPropsList() {
+        const container = document.getElementById('container-props-list');
+        const sidebarContainer = document.getElementById('sidebar-props-list');
+        const lblCount = document.getElementById('lbl-props-count');
+        const lblSidebarCount = document.getElementById('lbl-sidebar-props-count');
+        if (lblCount) lblCount.textContent = cachedPropsList.length;
+        if (lblSidebarCount) lblSidebarCount.textContent = cachedPropsList.length;
+
+        if (container) {
+          if (cachedPropsList.length === 0) {
+            container.innerHTML = `<div style="color:#64748b; font-size:12px; font-style:italic; padding:15px; text-align:center;">No custom props currently placed in game. Spawn props in the studio, press F8/F9 in Menyoo, or click "🏛️ Build Station".</div>`;
+          } else {
+            container.innerHTML = cachedPropsList.map(p => {
+              const isSel = activeProp && activeProp.id === p.id;
+              const zoneBadge = p.zone ? `<span style="background:#334155; color:#38bdf8; font-size:9px; padding:1px 5px; border-radius:3px; margin-left:6px;">${p.zone}</span>` : '';
+              return `
+                <div class="prop-item-row" data-id="${p.id}" style="display:flex; justify-content:space-between; align-items:center; background:${isSel ? '#1e3a5f' : '#1e293b'}; border:1px solid ${isSel ? '#38bdf8' : '#334155'}; padding:7px 10px; border-radius:4px;">
+                  <div style="font-size:12px;">
+                    <span style="font-weight:600; color:#f8fafc;">${p.label || p.model}</span>
+                    <span style="color:#64748b; font-size:11px; margin-left:6px;">#${p.id}</span>
+                    ${zoneBadge}
+                    <div style="color:#94a3b8; font-size:10px; font-family:monospace; margin-top:2px;">
+                      X: ${p.x.toFixed(1)}, Y: ${p.y.toFixed(1)}, Z: ${p.z.toFixed(1)} | ${p.heading.toFixed(0)}°
+                    </div>
+                  </div>
+                  <div style="display:flex; gap:5px; align-items:center;">
+                    <button class="tool-btn btn-sel-row" data-id="${p.id}" style="font-size:10px; padding:3px 7px; background:#0284c7; color:#fff;">🎮 Nudge</button>
+                    <button class="tool-btn btn-tp-row" data-x="${p.x}" data-y="${p.y}" data-z="${p.z}" style="font-size:10px; padding:3px 7px; background:#7c3aed; color:#fff;" title="Teleport to Prop">⚡ TP</button>
+                    <button class="tool-btn btn-del-row" data-id="${p.id}" style="font-size:10px; padding:3px 7px; background:#be123c; color:#fff;" title="Delete Prop">🗑️</button>
+                  </div>
+                </div>
+              `;
+            }).join('');
+
+            container.querySelectorAll('.btn-sel-row').forEach(btn => {
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const id = parseInt(btn.dataset.id);
+                selectPropForStudioEdit(id);
+              });
+            });
+            container.querySelectorAll('.btn-tp-row').forEach(btn => {
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                teleportPlayerTo(parseFloat(btn.dataset.x), parseFloat(btn.dataset.y) - 3.0, parseFloat(btn.dataset.z) + 1.0);
+              });
+            });
+            container.querySelectorAll('.btn-del-row').forEach(btn => {
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                deletePropById(parseInt(btn.dataset.id));
+              });
+            });
+          }
+        }
+
+        if (sidebarContainer) {
+          if (cachedPropsList.length === 0) {
+            sidebarContainer.innerHTML = `<div style="font-size:0.70rem; color:#64748b; text-align:center; padding:10px;">No custom props placed yet. Spawn above or press F8/F9 in Menyoo!</div>`;
+          } else {
+            // Show newest props first in the sidebar manager so the most recently placed prop is right at the top
+            const reversed = [...cachedPropsList].reverse();
+            sidebarContainer.innerHTML = reversed.map(p => {
+              const isSel = activeProp && activeProp.id === p.id;
+              return `
+                <div style="display:flex; justify-content:space-between; align-items:center; background:${isSel ? '#172a45' : '#111a28'}; border:1px solid ${isSel ? '#38bdf8' : '#26354d'}; padding:5px 7px; border-radius:4px; gap:6px;">
+                  <div style="min-width:0; flex:1;">
+                    <div style="font-size:0.72rem; font-weight:600; color:#f8fafc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                      ${p.model} <span style="color:#64748b; font-weight:400;">#${p.id}</span>
+                    </div>
+                    <div style="font-size:0.64rem; color:#94a3b8; font-family:'JetBrains Mono',monospace;">
+                      (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(1)}) · ${p.heading.toFixed(0)}°
+                    </div>
+                  </div>
+                  <div style="display:flex; gap:3px; flex-shrink:0;">
+                    <button class="btn-xs" onclick="window.selectPropForStudioEdit(${p.id})" style="background:#0284c7; border-color:#38bdf8; color:#fff;" title="Open in Nudge/Transform Studio">🎮</button>
+                    <button class="btn-xs" onclick="teleportPlayerTo(${p.x}, ${p.y - 3.0}, ${p.z + 1.0})" style="background:#7c3aed; border-color:#a855f7; color:#fff;" title="Teleport Player to Prop">⚡</button>
+                    <button class="btn-xs" onclick="window.deletePropById(${p.id})" style="background:#be123c; border-color:#f43f5e; color:#fff;" title="Delete This Prop">🗑️</button>
+                  </div>
+                </div>
+              `;
+            }).join('');
+          }
+        }
+      }
+
+      document.getElementById('btn-refresh-all-props')?.addEventListener('click', fetchAllProps);
+      document.getElementById('btn-refresh-selected-prop')?.addEventListener('click', fetchAllProps);
+
+      document.getElementById('btn-sidebar-quick-spawn')?.addEventListener('click', () => {
+        const sel = document.getElementById('sel-sidebar-quick-prop');
+        const model = sel ? sel.value : 'prop_walkway1';
+        executeSpawnProp({ model: model, snap_surface: true });
+      });
+
+      // 4. Layouts, Composite Entities & Presets
+      async function saveCurrentPropsAsEntity(layoutName) {
+        const cleanName = (layoutName || 'Custom_Station_Entity').trim();
+        if (!cleanName) {
+          showToast('⚠️ Please enter a name for the saved entity/layout!', true);
+          return;
+        }
+        showToast(`💾 Syncing, locking in world & saving "${cleanName}" as a Composite Entity...`);
+        try {
+          const res = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'SAVE_STATION_LAYOUT_DIRECT',
+              payload: { name: cleanName }
+            })
+          });
+          const data = await res.json();
+          const g = data.game_response || data;
+          if (g.status === 'ACK') {
+            if (Array.isArray(g.props)) {
+              cachedPropsList = g.props;
+              state.stationProps = g.props;
+              renderPropsList();
+              drawMap();
+            }
+            showToast(`✅ Locked ${g.count || cachedPropsList.length} props in world & saved "${cleanName}" as a single spawnable entity (+ Menyoo XML)!`);
+            loadSavedLayoutsList();
+          } else {
+            showToast(`❌ Save failed: ${g.message || data.error || 'Unknown error'}`, true);
+          }
+        } catch (ex) {
+          showToast(`❌ Save error: ${ex.message}`, true);
+        }
+      }
+
+      window.saveCurrentPropsAsEntity = saveCurrentPropsAsEntity;
+      window.saveCurrentPropsPrompt = function() {
+        const sideInput = document.getElementById('txt-sidebar-save-layout-name');
+        const defName = (sideInput && sideInput.value.trim()) ? sideInput.value.trim() : 'Custom_Station_Entity';
+        const chosen = prompt('Enter a name to save & lock all placed props as a single spawnable Composite Entity:', defName);
+        if (chosen && chosen.trim()) {
+          if (sideInput) sideInput.value = chosen.trim();
+          saveCurrentPropsAsEntity(chosen.trim());
+        }
+      };
+
+      async function loadSavedLayoutsList() {
+        try {
+          const res = await fetch('/api/station/layouts');
+          const data = await res.json();
+          const sel = document.getElementById('sel-saved-layouts');
+          const sideSel = document.getElementById('sel-sidebar-saved-layouts');
+          if (Array.isArray(data.layouts)) {
+            const html = data.layouts.length === 0
+              ? `<option value="">(No saved layouts found)</option>`
+              : data.layouts.map(l => `<option value="${l}">${l}</option>`).join('');
+            if (sel) sel.innerHTML = html;
+            if (sideSel) sideSel.innerHTML = html;
+          }
+        } catch (ex) {
+          console.error('[LOAD_LAYOUTS]', ex);
+        }
+      }
+
+      async function loadLayoutByName(name, spawnAtPlayer = false) {
+        if (!name) {
+          showToast('⚠️ Please select a saved entity / layout to spawn!');
+          return;
+        }
+        showToast(spawnAtPlayer
+          ? `🧍 Spawning whole entity "${name}" right in front of player...`
+          : `📂 Loading & spawning "${name}" at saved coordinates...`);
+        try {
+          const res = await fetch('/api/station/load_layout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+          });
+          const data = await res.json();
+          if (data.status === 'OK' && data.layout && Array.isArray(data.layout.props)) {
+            const bRes = await fetch('/api/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                command: 'BATCH_SPAWN_PROPS',
+                payload: {
+                  props: data.layout.props,
+                  clear_first: !spawnAtPlayer,
+                  spawn_at_player: spawnAtPlayer,
+                  offset_distance: 12.0
+                }
+              })
+            });
+            const bData = await bRes.json();
+            const bg = bData.game_response || bData;
+            if (bg.status === 'ACK') {
+              showToast(spawnAtPlayer
+                ? `✅ Spawned "${name}" (${bg.spawned_count} props) as 1 Whole Entity at player!`
+                : `✅ Loaded & Spawned ${bg.spawned_count} props from "${name}"!`);
+              fetchAllProps();
+            }
+          }
+        } catch (ex) {
+          showToast(`❌ Load error: ${ex.message}`, true);
+        }
+      }
+
+      document.getElementById('btn-sidebar-save-layout')?.addEventListener('click', () => {
+        const sideInput = document.getElementById('txt-sidebar-save-layout-name');
+        saveCurrentPropsAsEntity(sideInput ? sideInput.value : 'Custom_Station_Entity');
+      });
+
+      document.getElementById('btn-sidebar-load-layout')?.addEventListener('click', () => {
+        const sideSel = document.getElementById('sel-sidebar-saved-layouts');
+        loadLayoutByName(sideSel ? sideSel.value : '', false);
+      });
+
+      document.getElementById('btn-sidebar-spawn-entity-here')?.addEventListener('click', () => {
+        const sideSel = document.getElementById('sel-sidebar-saved-layouts');
+        loadLayoutByName(sideSel ? sideSel.value : '', true);
+      });
+
+      // Populate layouts on initial page load
+      loadSavedLayoutsList();
+
+      document.getElementById('btn-save-layout')?.addEventListener('click', async () => {
+        const nameInput = document.getElementById('txt-save-layout-name');
+        const name = nameInput ? nameInput.value.trim() : 'Custom_Station_Entity';
+        await saveCurrentPropsAsEntity(name || 'Custom_Station_Entity');
+      });
+
+      document.getElementById('btn-load-layout')?.addEventListener('click', async () => {
+        const sel = document.getElementById('sel-saved-layouts');
+        const name = sel ? sel.value : '';
+        loadLayoutByName(name, false);
+      });
+
+      document.getElementById('btn-modal-spawn-entity-here')?.addEventListener('click', async () => {
+        const sel = document.getElementById('sel-saved-layouts');
+        const name = sel ? sel.value : '';
+        loadLayoutByName(name, true);
+      });
+
+      document.getElementById('btn-clear-all-station-props')?.addEventListener('click', async () => {
+        if (!confirm('Are you sure you want to clear all custom station props?')) return;
+        try {
+          await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'CLEAR_ALL_PROPS', payload: {} })
+          });
+          showToast('🧹 Cleared all station props from game!');
+          activeProp = null;
+          state.stationProps = [];
+          updateSelectedPropCard();
+          fetchAllProps();
+        } catch (ex) {
+          showToast(`❌ Clear failed: ${ex.message}`, true);
+        }
+      });
+
+      document.getElementById('btn-spawn-nsrd-blueprint')?.addEventListener('click', () => {
+        document.getElementById('btn-build-station')?.click();
+      });
+
+      document.getElementById('btn-teleport-to-station')?.addEventListener('click', async () => {
+        try {
+          await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: 'TELEPORT_PLAYER',
+              payload: { x: -1334.0, y: -3054.0, z: 14.5, heading: 180.0, snap_ground: true }
+            })
+          });
+          showToast('👁️ Teleported inside Concourse Entrance/Exit Room!');
+        } catch (ex) {
+          showToast(`❌ Teleport failed: ${ex.message}`, true);
+        }
+      });
+    })();
+
     /* =========================================================================
        1. STATE & CALIBRATION CONSTANTS
        ========================================================================= */
@@ -1351,14 +2832,14 @@
       pendingMapAction: null, // { action: 'set-origin' | 'set-dest', groupId: '...' }
       player: { valid: false, x: null, y: null, z: null, heading: 0, handle: 0 },
       experiment: {
-        name: 'South Los Santos Simulation',
+        name: 'LSIA Station & Street Market Simulation',
         state: 'STOPPED',
         shape: 'RECTANGLE',
-        centerX: -14.4,
-        centerY: -1438.5,
-        width: 300,
-        height: 300,
-        radius: 150
+        centerX: -1335.0,
+        centerY: -3052.0,
+        width: 140,
+        height: 120,
+        radius: 100
       },
       savedPoints: [],
       groups: [
@@ -1367,25 +2848,29 @@
           name: 'Pedestrian Flow 1',
           color: '#38bdf8',
           enabled: true,
-          count: 20,
+          count: 40,
           originPointId: null,
           destinationPointId: null,
-          destinationRadius: 15.0,
-          originRadius: 10.0,
+          destinationRadius: 12.0,
+          originRadius: 8.0,
           preset: 'casual',
-          speed: 1.0,
-          spawnRate: 2.5,
+          speed: 1.5,
+          spawnRate: 5.0,
           densityAware: false,
           behavior: 'ROUTE_TRAVEL',
-          arrivalBehavior: 'WANDER',
+          arrivalBehavior: 'DESPAWN_AT_DEST',
           vehicleCleanup: false,
           vehicleCleanupRadius: 40.0,
           vehicleCleanupCenter: 'ORIGIN',
-          waypoints: []
+          waypoints: [],
+          despawnCheckpointEnabled: false,
+          despawnPointId: null,
+          despawnRadius: 10.0
         }
       ],
       pathsDB: [],
       livePeds: [],
+      stationProps: [],
       heatmapCells: []
     };
 
@@ -1440,11 +2925,57 @@
 
       drawWorldGrid();
       drawExperimentBoundary();
+      drawStationProps();
       drawHeatmap();
       drawGroupRoutes();
       drawSavedPoints();
       drawLivePedestrians();
       drawPlayerMarker();
+    }
+
+    function drawStationProps() {
+      if (!state.stationProps || state.stationProps.length === 0) return;
+      ctx.save();
+      const pxPerMeter = (IMG_DIM / WORLD_W) * state.zoom;
+      state.stationProps.forEach(prop => {
+        const s = worldToScreen(prop.x, prop.y);
+        const wMeters = Math.max(1.2, prop.width || 2.5);
+        const lMeters = Math.max(1.2, prop.length || 2.5);
+        const pw = Math.max(4, wMeters * pxPerMeter);
+        const pl = Math.max(4, lMeters * pxPerMeter);
+
+        let fillCol = 'rgba(20, 184, 166, 0.35)';
+        let strokeCol = '#2dd4bf';
+        const zName = (prop.zone || '').toUpperCase();
+        if (zName.includes('FOB') || zName.includes('BRIDGE')) {
+          fillCol = 'rgba(56, 189, 248, 0.45)';
+          strokeCol = '#38bdf8';
+        } else if (zName.includes('STAIR')) {
+          fillCol = 'rgba(245, 158, 11, 0.50)';
+          strokeCol = '#fbbf24';
+        } else if (zName.includes('HALL') || zName.includes('GATE') || zName.includes('TURNSTILE')) {
+          fillCol = 'rgba(16, 185, 129, 0.40)';
+          strokeCol = '#34d399';
+        } else if (zName.includes('MARKET')) {
+          fillCol = 'rgba(168, 85, 247, 0.40)';
+          strokeCol = '#c084fc';
+        } else if (zName.includes('ROAD')) {
+          fillCol = 'rgba(59, 130, 246, 0.40)';
+          strokeCol = '#60a5fa';
+        }
+
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        const rad = -((prop.heading || 0) * Math.PI) / 180.0;
+        ctx.rotate(rad);
+        ctx.fillStyle = fillCol;
+        ctx.strokeStyle = strokeCol;
+        ctx.lineWidth = 1.2;
+        ctx.fillRect(-pw / 2, -pl / 2, pw, pl);
+        ctx.strokeRect(-pw / 2, -pl / 2, pw, pl);
+        ctx.restore();
+      });
+      ctx.restore();
     }
 
     function drawSchematicMap() {
@@ -1527,12 +3058,44 @@
         if (!grp.enabled) return;
         const origPt = state.savedPoints.find(p => p.id === grp.originPointId);
         const destPt = state.savedPoints.find(p => p.id === grp.destinationPointId);
-        if (!origPt || !destPt) return;
 
-        const p1 = worldToScreen(origPt.x, origPt.y);
-        const p2 = worldToScreen(destPt.x, destPt.y);
+        // Build the ordered sequence of route nodes: Origin -> Via 1..N -> Destination
+        const routeNodes = [];
+        if (origPt) routeNodes.push({ x: origPt.x, y: origPt.y, type: 'ORIGIN', name: origPt.name });
+        if (grp.waypoints && grp.waypoints.length > 0) {
+          grp.waypoints.forEach((wp, idx) => {
+            const pt = wp.pointId ? state.savedPoints.find(p => p.id === wp.pointId) : null;
+            const wx = pt ? pt.x : wp.x;
+            const wy = pt ? pt.y : wp.y;
+            routeNodes.push({ x: wx, y: wy, type: 'VIA', name: pt ? pt.name : `Via ${idx + 1}`, viaIndex: idx });
+          });
+        }
+        if (destPt) routeNodes.push({ x: destPt.x, y: destPt.y, type: 'DEST', name: destPt.name });
+
+        // If separate despawn checkpoint is enabled, connect route to it
+        if (grp.despawnCheckpointEnabled && grp.despawnPointId) {
+          const dspPt = state.savedPoints.find(p => p.id === grp.despawnPointId);
+          if (dspPt) {
+            routeNodes.push({ x: dspPt.x, y: dspPt.y, type: 'DESPAWN', name: dspPt.name });
+          }
+        }
+
+        if (routeNodes.length < 2) {
+          if (origPt) {
+            const p1 = worldToScreen(origPt.x, origPt.y);
+            const origRadPixels = ((grp.originRadius || 10.0) / WORLD_W) * IMG_DIM * state.zoom;
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(p1.x, p1.y, origRadPixels, 0, Math.PI * 2);
+            ctx.strokeStyle = grp.color;
+            ctx.setLineDash([2, 4]);
+            ctx.stroke();
+            ctx.restore();
+          }
+          return;
+        }
+
         const isSelected = grp.id === state.selectedGroupId;
-
         ctx.save();
         ctx.strokeStyle = grp.color;
         ctx.lineWidth = isSelected ? 4 : 2;
@@ -1541,37 +3104,108 @@
           ctx.shadowBlur = 10;
         }
 
-        // Route line
+        // Draw continuous multi-segment route line
         ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        if (grp.waypoints && grp.waypoints.length > 0) {
-          grp.waypoints.forEach(wp => {
-            const swp = worldToScreen(wp.x, wp.y);
-            ctx.lineTo(swp.x, swp.y);
-          });
+        const pStart = worldToScreen(routeNodes[0].x, routeNodes[0].y);
+        ctx.moveTo(pStart.x, pStart.y);
+        for (let i = 1; i < routeNodes.length; i++) {
+          const sp = worldToScreen(routeNodes[i].x, routeNodes[i].y);
+          ctx.lineTo(sp.x, sp.y);
         }
-        ctx.lineTo(p2.x, p2.y);
         ctx.stroke();
 
-        // Chevrons along route
-        drawChevrons(p1, p2, grp.color);
+        // Draw directional flow chevrons along EACH segment of the route
+        for (let i = 0; i < routeNodes.length - 1; i++) {
+          const s1 = worldToScreen(routeNodes[i].x, routeNodes[i].y);
+          const s2 = worldToScreen(routeNodes[i + 1].x, routeNodes[i + 1].y);
+          drawChevrons(s1, s2, grp.color);
+        }
+
+        // Draw intermediate checkpoints / vias as cyan diamonds with sequential labels
+        routeNodes.forEach(node => {
+          if (node.type === 'VIA') {
+            const swp = worldToScreen(node.x, node.y);
+            ctx.save();
+            ctx.fillStyle = '#06b6d4';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(swp.x, swp.y - 7);
+            ctx.lineTo(swp.x + 7, swp.y);
+            ctx.lineTo(swp.x, swp.y + 7);
+            ctx.lineTo(swp.x - 7, swp.y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = '#000000';
+            ctx.shadowBlur = 4;
+            ctx.fillText(`Via ${node.viaIndex + 1}: ${node.name}`, swp.x + 9, swp.y + 4);
+            ctx.restore();
+          }
+        });
+
+        // Draw separate despawn checkpoint marker & radius circle
+        if (grp.despawnCheckpointEnabled && grp.despawnPointId) {
+          const dspPt = state.savedPoints.find(p => p.id === grp.despawnPointId);
+          if (dspPt) {
+            const sdsp = worldToScreen(dspPt.x, dspPt.y);
+            ctx.save();
+            ctx.fillStyle = '#ef4444';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2.0;
+            ctx.beginPath();
+            ctx.moveTo(sdsp.x, sdsp.y - 8);
+            ctx.lineTo(sdsp.x + 8, sdsp.y);
+            ctx.lineTo(sdsp.x, sdsp.y + 8);
+            ctx.lineTo(sdsp.x - 8, sdsp.y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.fillStyle = '#fca5a5';
+            ctx.shadowColor = '#000000';
+            ctx.shadowBlur = 4;
+            const exitCount = grp.exitedCount || 0;
+            ctx.fillText(`🏁 Despawn: ${dspPt.name} (${exitCount} exited)`, sdsp.x + 10, sdsp.y + 4);
+
+            const dspRadPixels = ((grp.despawnRadius || 10.0) / WORLD_W) * IMG_DIM * state.zoom;
+            ctx.beginPath();
+            ctx.arc(sdsp.x, sdsp.y, dspRadPixels, 0, Math.PI * 2);
+            ctx.strokeStyle = '#ef4444';
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+            ctx.fill();
+            ctx.restore();
+          }
+        }
 
         // Destination radius circle
-        const destRadPixels = ((grp.destinationRadius || 15.0) / WORLD_W) * IMG_DIM * state.zoom;
-        ctx.beginPath();
-        ctx.arc(p2.x, p2.y, destRadPixels, 0, Math.PI * 2);
-        ctx.strokeStyle = grp.color;
-        ctx.setLineDash([4, 4]);
-        ctx.stroke();
-        ctx.fillStyle = hexToRgba(grp.color, 0.12);
-        ctx.fill();
+        if (destPt) {
+          const p2 = worldToScreen(destPt.x, destPt.y);
+          const destRadPixels = ((grp.destinationRadius || 15.0) / WORLD_W) * IMG_DIM * state.zoom;
+          ctx.beginPath();
+          ctx.arc(p2.x, p2.y, destRadPixels, 0, Math.PI * 2);
+          ctx.strokeStyle = grp.color;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.fillStyle = hexToRgba(grp.color, 0.12);
+          ctx.fill();
+        }
 
         // Origin radius circle
-        const origRadPixels = ((grp.originRadius || 10.0) / WORLD_W) * IMG_DIM * state.zoom;
-        ctx.beginPath();
-        ctx.arc(p1.x, p1.y, origRadPixels, 0, Math.PI * 2);
-        ctx.setLineDash([2, 4]);
-        ctx.stroke();
+        if (origPt) {
+          const p1 = worldToScreen(origPt.x, origPt.y);
+          const origRadPixels = ((grp.originRadius || 10.0) / WORLD_W) * IMG_DIM * state.zoom;
+          ctx.beginPath();
+          ctx.arc(p1.x, p1.y, origRadPixels, 0, Math.PI * 2);
+          ctx.setLineDash([2, 4]);
+          ctx.stroke();
+        }
 
         ctx.restore();
       });
@@ -1716,7 +3350,13 @@
         quickAssignOrigin(world.x, world.y);
       } else if (state.mode === 'dest') {
         quickAssignDest(world.x, world.y);
-      }
+      } else if (state.mode === 'via') {
+        quickAddWaypoint(world.x, world.y);
+      } else if (state.mode === 'despawn') {
+        quickAssignDespawn(world.x, world.y);
+      } else if (state.mode === 'teleport') {
+          teleportPlayerTo(world.x, world.y);
+        }
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -1771,8 +3411,95 @@
       'pan': document.getElementById('mode-pan'),
       'point': document.getElementById('mode-point'),
       'origin': document.getElementById('mode-origin'),
-      'dest': document.getElementById('mode-dest')
+      'dest': document.getElementById('mode-dest'),
+      'via': document.getElementById('mode-via'),
+      'despawn': document.getElementById('mode-despawn'),
+      'teleport': document.getElementById('mode-teleport')
     };
+
+    
+    /* =========================================================================
+       TELEPORT LOGIC & PRESETS
+       ========================================================================= */
+    async function teleportPlayerTo(wx, wy, wz = null) {
+      const coordStr = `(${wx.toFixed(1)}, ${wy.toFixed(1)})`;
+      showToast(`⚡ Teleporting to ${coordStr}...`);
+      try {
+        const payload = { x: Math.round(wx * 10) / 10, y: Math.round(wy * 10) / 10 };
+        if (wz !== null && !isNaN(wz)) payload.z = Math.round(wz * 10) / 10;
+
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            command: 'TELEPORT_PLAYER',
+            payload: payload
+          })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`⚡ Successfully teleported to ${coordStr}!`);
+          state.player.x = wx;
+          state.player.y = wy;
+          state.followPlayer = true;
+          updateFollowBtn();
+          const u = (wx - MAP_X_MIN) / WORLD_W;
+          const v = (MAP_Y_MAX - wy) / WORLD_H;
+          state.panX = u * IMG_DIM;
+          state.panY = v * IMG_DIM;
+          drawMap();
+        } else {
+          showToast(`Teleport failed: ${data.error || 'Server error'}`);
+        }
+      } catch (err) {
+        showToast(`Teleport error: ${err.message}`);
+      }
+      setMode('pan');
+    }
+
+    const btnPopupTeleport = document.getElementById('btn-popup-teleport');
+    if (btnPopupTeleport) {
+      btnPopupTeleport.addEventListener('click', () => {
+        teleportPlayerTo(currentPopupWorld.x, currentPopupWorld.y);
+        closePointPopup();
+      });
+    }
+
+    const selQuickTp = document.getElementById('sel-quick-tp');
+    if (selQuickTp) {
+      selQuickTp.addEventListener('change', () => {
+        const val = selQuickTp.value;
+        selQuickTp.value = '';
+        if (!val) return;
+
+        if (val === 'origin') {
+          const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+          if (grp && grp.originPointId) {
+            const pt = state.savedPoints.find(p => p.id === grp.originPointId);
+            if (pt) {
+              teleportPlayerTo(pt.x, pt.y);
+              return;
+            }
+          }
+          showToast('No origin point set for current group');
+        } else if (val === 'dest') {
+          const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+          if (grp && grp.destinationPointId) {
+            const pt = state.savedPoints.find(p => p.id === grp.destinationPointId);
+            if (pt) {
+              teleportPlayerTo(pt.x, pt.y);
+              return;
+            }
+          }
+          showToast('No destination point set for current group');
+        } else {
+          const parts = val.split(',').map(s => parseFloat(s.trim()));
+          if (parts.length >= 2) {
+            teleportPlayerTo(parts[0], parts[1], parts.length >= 3 ? parts[2] : null);
+          }
+        }
+      });
+    }
 
     function setMode(newMode) {
       state.mode = newMode;
@@ -1943,8 +3670,252 @@
       setMode('pan');
     }
 
+    function orderWaypointsLogicalFlow(grp) {
+      if (!grp || !grp.waypoints || grp.waypoints.length <= 1) return;
+
+      const origPt = state.savedPoints.find(p => p.id === grp.originPointId);
+      const destPt = state.savedPoints.find(p => p.id === grp.destinationPointId);
+
+      // Sync coords from savedPoints if pointId is set
+      grp.waypoints.forEach(wp => {
+        if (wp.pointId) {
+          const sp = state.savedPoints.find(p => p.id === wp.pointId);
+          if (sp) {
+            wp.x = sp.x;
+            wp.y = sp.y;
+          }
+        }
+      });
+
+      if (origPt && destPt) {
+        const dx = destPt.x - origPt.x;
+        const dy = destPt.y - origPt.y;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq > 0.01) {
+          grp.waypoints.sort((a, b) => {
+            const ta = ((a.x - origPt.x) * dx + (a.y - origPt.y) * dy) / lenSq;
+            const tb = ((b.x - origPt.x) * dx + (b.y - origPt.y) * dy) / lenSq;
+            return ta - tb;
+          });
+          return;
+        }
+      }
+
+      if (origPt) {
+        grp.waypoints.sort((a, b) => {
+          const da = Math.hypot(a.x - origPt.x, a.y - origPt.y);
+          const db = Math.hypot(b.x - origPt.x, b.y - origPt.y);
+          return da - db;
+        });
+        return;
+      }
+
+      if (destPt) {
+        grp.waypoints.sort((a, b) => {
+          const da = Math.hypot(a.x - destPt.x, a.y - destPt.y);
+          const db = Math.hypot(b.x - destPt.x, b.y - destPt.y);
+          return db - da;
+        });
+        return;
+      }
+    }
+
+    function quickAssignDespawn(wx, wy) {
+      let pt = state.savedPoints.find(p => Math.hypot(p.x - wx, p.y - wy) < 25);
+      if (!pt) {
+        pt = {
+          id: `pt_${Date.now()}`,
+          name: `Despawn Point (${wx.toFixed(0)}, ${wy.toFixed(0)})`,
+          x: Math.round(wx * 10) / 10,
+          y: Math.round(wy * 10) / 10
+        };
+        state.savedPoints.push(pt);
+        populatePointDropdowns();
+        renderSavedPointsList();
+      }
+
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (grp) {
+        grp.despawnCheckpointEnabled = true;
+        grp.despawnPointId = pt.id;
+        syncActiveGroupUI();
+        syncGroup(grp);
+      }
+      drawMap();
+      setMode('pan');
+      showToast(`Set Despawn Checkpoint to "${pt.name}"`);
+    }
+
+    function quickAddWaypoint(wx, wy) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp) {
+        alert('Please select or create a pedestrian group first.');
+        return;
+      }
+      if (!grp.waypoints) grp.waypoints = [];
+
+      // 1. Check if clicked near an existing saved point (within ~25m)
+      let pt = state.savedPoints.find(p => Math.hypot(p.x - wx, p.y - wy) < 25);
+
+      // 2. If not near any saved point, create a new saved point so it appears in the dropdown
+      if (!pt) {
+        pt = {
+          id: `pt_${Date.now()}`,
+          name: `Point ${state.savedPoints.length + 1}`,
+          x: Math.round(wx * 10) / 10,
+          y: Math.round(wy * 10) / 10
+        };
+        state.savedPoints.push(pt);
+        populatePointDropdowns();
+        renderSavedPointsList();
+      }
+
+      // 3. Add to waypoints
+      grp.waypoints.push({
+        pointId: pt.id,
+        x: pt.x,
+        y: pt.y
+      });
+
+      // User sequence preserved
+      // 5. Update UI & Backend
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+      showToast(`Added Checkpoint "${pt.name}" in flow order`);
+    }
+
+    window.onWaypointPointChange = function(idx, pointId) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp || !grp.waypoints || !grp.waypoints[idx]) return;
+
+      if (!pointId) {
+        grp.waypoints.splice(idx, 1);
+      } else {
+        const pt = state.savedPoints.find(p => p.id === pointId);
+        if (pt) {
+          grp.waypoints[idx].pointId = pt.id;
+          grp.waypoints[idx].x = pt.x;
+          grp.waypoints[idx].y = pt.y;
+        }
+      }
+
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+    };
+
+    window.moveWaypoint = function(idx, direction) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp || !grp.waypoints) return;
+      const targetIdx = idx + direction;
+      if (targetIdx < 0 || targetIdx >= grp.waypoints.length) return;
+
+      const temp = grp.waypoints[idx];
+      grp.waypoints[idx] = grp.waypoints[targetIdx];
+      grp.waypoints[targetIdx] = temp;
+
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+    };
+
+    window.removeWaypoint = function(idx) {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp || !grp.waypoints) return;
+      grp.waypoints.splice(idx, 1);
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+    };
+
+    function updateWaypointsUI(grp) {
+      const countLbl = document.getElementById('lbl-wp-count');
+      const listContainer = document.getElementById('group-waypoints-list');
+      if (!grp || !grp.waypoints || grp.waypoints.length === 0) {
+        if (countLbl) countLbl.textContent = '0';
+        if (listContainer) {
+          listContainer.innerHTML = '<div style="color:var(--text-muted); font-size:0.72rem; font-style:italic; padding:4px;">No intermediate checkpoints added. Peds walk straight from Origin to Destination.</div>';
+        }
+        return;
+      }
+      if (countLbl) countLbl.textContent = grp.waypoints.length;
+      if (!listContainer) return;
+
+      listContainer.innerHTML = grp.waypoints.map((wp, i) => {
+        let optionsHtml = '<option value="">-- Select Point --</option>';
+        let matched = false;
+        state.savedPoints.forEach(p => {
+          const isSelected = (wp.pointId === p.id) || (!wp.pointId && Math.hypot(wp.x - p.x, wp.y - p.y) < 2.0);
+          if (isSelected) {
+            matched = true;
+            wp.pointId = p.id;
+            wp.x = p.x;
+            wp.y = p.y;
+          }
+          optionsHtml += `<option value="${p.id}" ${isSelected ? 'selected' : ''}>${p.name} (${p.x.toFixed(1)}, ${p.y.toFixed(1)})</option>`;
+        });
+
+        if (!matched && (wp.x !== undefined && wp.y !== undefined)) {
+          optionsHtml += `<option value="__custom__" selected>Custom (${wp.x.toFixed(1)}, ${wp.y.toFixed(1)})</option>`;
+        }
+
+        const isFirst = (i === 0);
+        const isLast = (i === grp.waypoints.length - 1);
+
+        return `
+          <div style="display:flex; align-items:center; background:#0b1322; border:1px solid #1e293b; padding:4px 6px; border-radius:4px; gap:6px;">
+            <span style="color:#06b6d4; font-weight:700; font-size:0.72rem; white-space:nowrap; min-width:38px;">Via ${i + 1}</span>
+            <select class="form-control" style="flex:1; height:24px; font-size:0.72rem; padding:1px 4px; background:#0f172a; color:#f8fafc; border:1px solid #334155;" onchange="onWaypointPointChange(${i}, this.value)">
+              ${optionsHtml}
+            </select>
+            <button type="button" class="btn btn-xs" onclick="moveWaypoint(${i}, -1)" ${isFirst ? 'disabled style="opacity:0.3;"' : ''} style="padding:1px 4px; height:22px; font-size:0.65rem;" title="Move earlier in flow">▲</button>
+            <button type="button" class="btn btn-xs" onclick="moveWaypoint(${i}, 1)" ${isLast ? 'disabled style="opacity:0.3;"' : ''} style="padding:1px 4px; height:22px; font-size:0.65rem;" title="Move later in flow">▼</button>
+            <button type="button" class="btn btn-xs btn-danger" onclick="removeWaypoint(${i})" style="padding:1px 5px; height:22px; font-size:0.65rem;" title="Remove checkpoint">✕</button>
+          </div>
+        `;
+      }).join('');
+    }
+
     document.getElementById('btn-pick-origin-map').addEventListener('click', () => setMode('origin'));
     document.getElementById('btn-pick-dest-map').addEventListener('click', () => setMode('dest'));
+    document.getElementById('btn-pick-wp-map').addEventListener('click', () => setMode('via'));
+
+    document.getElementById('btn-add-wp-dropdown').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp) return;
+      if (!grp.waypoints) grp.waypoints = [];
+
+      const usedIds = new Set([grp.originPointId, grp.destinationPointId, ...grp.waypoints.map(w => w.pointId)]);
+      const availablePt = state.savedPoints.find(p => !usedIds.has(p.id)) || state.savedPoints[0];
+
+      if (availablePt) {
+        grp.waypoints.push({
+          pointId: availablePt.id,
+          x: availablePt.x,
+          y: availablePt.y
+        });
+        orderWaypointsLogicalFlow(grp);
+      } else {
+        setMode('via');
+        showToast('Click on the map to place a checkpoint');
+        return;
+      }
+
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+    });
+
+    document.getElementById('btn-order-wps').addEventListener('click', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId) || state.groups[0];
+      if (!grp) return;
+      orderWaypointsLogicalFlow(grp);
+      updateWaypointsUI(grp);
+      syncGroup(grp);
+      drawMap();
+      showToast('Re-ordered checkpoints along route flow');
+    });
 
     /* =========================================================================
        5. GROUP MANAGER & SELECTED GROUP CONFIGURATION
@@ -1972,8 +3943,87 @@
     const grpVehCenterSelect = document.getElementById('grp-veh-center');
     const grpVehRadiusInput = document.getElementById('grp-veh-radius');
 
+    const grpContinuousStreamChk = document.getElementById('grp-continuous-stream');
+    const badgeStreamMode = document.getElementById('badge-stream-mode');
+    const grpDespawnChk = document.getElementById('grp-despawn-enabled');
+    const rowGrpDespawnSettings = document.getElementById('row-grp-despawn-settings');
+    const grpDespawnSelect = document.getElementById('grp-despawn-select');
+    const grpDespawnRadiusInput = document.getElementById('grp-despawn-radius');
+    const badgeDespawnStatus = document.getElementById('badge-despawn-status');
+    const btnPickDespawnMap = document.getElementById('btn-pick-despawn-map');
+
     grpVehCleanupChk.addEventListener('change', () => {
       rowGrpVehSettings.style.display = grpVehCleanupChk.checked ? 'flex' : 'none';
+    });
+
+    grpContinuousStreamChk.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.continuousStream = grpContinuousStreamChk.checked;
+        badgeStreamMode.textContent = grp.continuousStream ? 'ACTIVE STREAM' : 'ONE-TIME WAVE';
+        badgeStreamMode.style.background = grp.continuousStream ? '#064e3b' : '#334155';
+        badgeStreamMode.style.color = grp.continuousStream ? '#34d399' : '#94a3b8';
+        syncGroup(grp);
+        updateGroupActionButtons();
+        showToast(`Stream mode: ${grp.continuousStream ? 'Endless Auto-Replenish' : 'One-Time Wave'}`);
+      }
+    });
+
+    grpDespawnChk.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.continuousStream = grpContinuousStreamChk.checked;
+      grp.despawnCheckpointEnabled = grpDespawnChk.checked;
+        rowGrpDespawnSettings.style.display = grp.despawnCheckpointEnabled ? 'flex' : 'none';
+        badgeDespawnStatus.textContent = grp.despawnCheckpointEnabled ? 'ENABLED' : 'DISABLED';
+        badgeDespawnStatus.style.background = grp.despawnCheckpointEnabled ? '#15803d' : '#450a0a';
+        badgeDespawnStatus.style.color = grp.despawnCheckpointEnabled ? '#86efac' : '#fca5a5';
+        syncGroup(grp);
+        drawMap();
+        showToast(`Despawn Checkpoint ${grp.despawnCheckpointEnabled ? 'ENABLED' : 'DISABLED'}`);
+      }
+    });
+
+    grpDespawnSelect.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.despawnPointId = grpDespawnSelect.value;
+        syncGroup(grp);
+        drawMap();
+      }
+    });
+
+    grpDespawnRadiusInput.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.despawnRadius = parseFloat(grpDespawnRadiusInput.value) || 10.0;
+        syncGroup(grp);
+        drawMap();
+      }
+    });
+
+    btnPickDespawnMap.addEventListener('click', () => setMode('despawn'));
+
+    grpOriginSelect.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.originPointId = grpOriginSelect.value;
+        orderWaypointsLogicalFlow(grp);
+        updateWaypointsUI(grp);
+        syncGroup(grp);
+        drawMap();
+      }
+    });
+
+    grpDestSelect.addEventListener('change', () => {
+      const grp = state.groups.find(g => g.id === state.selectedGroupId);
+      if (grp) {
+        grp.destinationPointId = grpDestSelect.value;
+        orderWaypointsLogicalFlow(grp);
+        updateWaypointsUI(grp);
+        syncGroup(grp);
+        drawMap();
+      }
     });
 
     function renderGroupList() {
@@ -2028,6 +4078,7 @@
       });
       grpOriginSelect.innerHTML = html;
       grpDestSelect.innerHTML = html;
+      grpDespawnSelect.innerHTML = html;
       document.getElementById('new-grp-origin').innerHTML = html;
       document.getElementById('new-grp-dest').innerHTML = html;
 
@@ -2035,6 +4086,7 @@
       if (grp) {
         grpOriginSelect.value = grp.originPointId || '';
         grpDestSelect.value = grp.destinationPointId || '';
+        grpDespawnSelect.value = grp.despawnPointId || '';
       }
     }
 
@@ -2062,12 +4114,27 @@
       grpArrivalSelect.value = grp.arrivalBehavior;
 
       grpVehCleanupChk.checked = grp.vehicleCleanup || false;
+      
+      grpContinuousStreamChk.checked = grp.continuousStream !== false;
+      badgeStreamMode.textContent = (grp.continuousStream !== false) ? 'ACTIVE STREAM' : 'ONE-TIME WAVE';
+      badgeStreamMode.style.background = (grp.continuousStream !== false) ? '#064e3b' : '#334155';
+      badgeStreamMode.style.color = (grp.continuousStream !== false) ? '#34d399' : '#94a3b8';
+
+      grpDespawnChk.checked = grp.despawnCheckpointEnabled || false;
+      rowGrpDespawnSettings.style.display = grp.despawnCheckpointEnabled ? 'flex' : 'none';
+      grpDespawnSelect.value = grp.despawnPointId || '';
+      grpDespawnRadiusInput.value = grp.despawnRadius || 10.0;
+      badgeDespawnStatus.textContent = grp.despawnCheckpointEnabled ? 'ENABLED' : 'DISABLED';
+      badgeDespawnStatus.style.background = grp.despawnCheckpointEnabled ? '#15803d' : '#450a0a';
+      badgeDespawnStatus.style.color = grp.despawnCheckpointEnabled ? '#86efac' : '#fca5a5';
+
       updateGroupActionButtons();
       rowGrpVehSettings.style.display = grp.vehicleCleanup ? 'flex' : 'none';
       grpVehCenterSelect.value = grp.vehicleCleanupCenter || 'ORIGIN';
       grpVehRadiusInput.value = grp.vehicleCleanupRadius || 40.0;
 
       document.getElementById('lbl-wp-count').textContent = grp.waypoints ? grp.waypoints.length : 0;
+      updateWaypointsUI(grp);
     }
 
     function saveGroupFormInputs(grp) {
@@ -2089,6 +4156,9 @@
       grp.vehicleCleanup = grpVehCleanupChk.checked;
       grp.vehicleCleanupCenter = grpVehCenterSelect.value;
       grp.vehicleCleanupRadius = parseFloat(grpVehRadiusInput.value) || 40.0;
+      grp.despawnCheckpointEnabled = grpDespawnChk.checked;
+      grp.despawnPointId = grpDespawnSelect.value;
+      grp.despawnRadius = parseFloat(grpDespawnRadiusInput.value) || 10.0;
     }
 
     function groupPayload(grp, extra = {}) {
@@ -2111,6 +4181,12 @@
         move_speed: grp.speed,
         behavior: hasRoute ? (grp.behavior || 'ROUTE_TRAVEL') : grp.behavior,
         arrival_behavior: grp.arrivalBehavior,
+        continuous_stream: grp.continuousStream !== false,
+        despawn_checkpoint_enabled: grp.despawnCheckpointEnabled || false,
+        despawn_checkpoint: (grp.despawnCheckpointEnabled && state.savedPoints.find(p => p.id === grp.despawnPointId)) 
+          ? { x: state.savedPoints.find(p => p.id === grp.despawnPointId).x, y: state.savedPoints.find(p => p.id === grp.despawnPointId).y } 
+          : null,
+        despawn_radius: grp.despawnRadius || 10.0,
         preset: grp.preset,
         density_aware: grp.densityAware,
         vehicle_cleanup: grp.vehicleCleanup,
@@ -2148,6 +4224,16 @@
       if (lblAlive) lblAlive.textContent = alive;
       if (lblTarget) lblTarget.textContent = target;
       if (lblPending) lblPending.textContent = pending;
+
+      const lblExited = document.getElementById('lbl-grp-exited');
+      if (lblExited) lblExited.textContent = grp.exitedCount || 0;
+
+      const lblStream = document.getElementById('lbl-stream-indicator');
+      if (lblStream) {
+        const isStreaming = (grp.continuousStream !== false) && (grp.despawnCheckpointEnabled || grp.arrivalBehavior === 'DESPAWN_AT_DEST');
+        lblStream.style.display = isStreaming ? 'inline' : 'none';
+        lblStream.textContent = isStreaming ? '🌊 STREAMING' : '';
+      }
 
       if (resumeBtn) {
         if (st === 'PAUSED') {
@@ -2337,8 +4423,10 @@
       const grp = state.groups.find(g => g.id === state.selectedGroupId);
       if (grp) {
         grp.waypoints = [];
-        document.getElementById('lbl-wp-count').textContent = 0;
+        updateWaypointsUI(grp);
+        syncGroup(grp);
         drawMap();
+        showToast(`Cleared all checkpoints for "${grp.name}"`);
       }
     });
 
@@ -3070,7 +5158,35 @@
               `Player: X: ${tel.player.x.toFixed(1)}, Y: ${tel.player.y.toFixed(1)}, Z: ${tel.player.z.toFixed(1)} (${tel.player.heading.toFixed(1)}°)`;
 
             // Auto-follow Franklin if enabled
-            if (state.followPlayer) {
+          if (tel && tel.player) {
+            if (tel.player.god_mode !== undefined && btnToggleGod) {
+              isGodModeActive = tel.player.god_mode;
+              btnToggleGod.textContent = isGodModeActive ? '🛡️ God: ON' : '🛡️ God: OFF';
+              btnToggleGod.classList.toggle('active', isGodModeActive);
+              btnToggleGod.style.background = isGodModeActive ? '#15803d' : '#334155';
+              btnToggleGod.style.borderColor = isGodModeActive ? '#22c55e' : '#475569';
+            }
+            if (tel.player.never_wanted !== undefined && btnToggleNeverWanted) {
+              isNeverWantedActive = tel.player.never_wanted;
+              btnToggleNeverWanted.textContent = isNeverWantedActive ? '🚫 No Cops: ON' : '🚫 No Cops: OFF';
+              btnToggleNeverWanted.classList.toggle('active', isNeverWantedActive);
+              btnToggleNeverWanted.style.background = isNeverWantedActive ? '#0284c7' : '#334155';
+              btnToggleNeverWanted.style.borderColor = isNeverWantedActive ? '#38bdf8' : '#475569';
+            }
+            if (tel.player.noclip !== undefined && btnToggleFly) {
+              isFlyModeActive = tel.player.noclip;
+              btnToggleFly.textContent = isFlyModeActive ? '🦅 Fly: ON (F6)' : '🦅 Fly: OFF';
+              btnToggleFly.classList.toggle('active', isFlyModeActive);
+            }
+            if (tel.player.prop_builder !== undefined && btnToggle3dBuilder) {
+              is3dBuilderActive = tel.player.prop_builder;
+              btnToggle3dBuilder.textContent = is3dBuilderActive ? '🎮 Builder: ON' : '🎮 Builder (F11)';
+              btnToggle3dBuilder.classList.toggle('active', is3dBuilderActive);
+              btnToggle3dBuilder.style.background = is3dBuilderActive ? '#16a34a' : '#7c3aed';
+            }
+          }
+
+          if (state.followPlayer) {
               const u = (state.player.x - MAP_X_MIN) / WORLD_W;
               const v = (MAP_Y_MAX - state.player.y) / WORLD_H;
               state.panX = u * IMG_DIM;
@@ -3100,6 +5216,7 @@
                 grp.failedCount = g.failed_count;
                 grp.pendingCount = g.pending_count;
                 grp.status = g.status;
+                if (g.exited_count !== undefined) grp.exitedCount = g.exited_count;
               }
             });
             if (groupsChanged) {
@@ -3112,6 +5229,13 @@
             state.livePeds = tel.peds;
             document.getElementById('txt-active-peds-count').textContent = `Active Peds: ${tel.peds.length}`;
             document.getElementById('metric-peds').textContent = tel.peds.length;
+          }
+
+          if (tel && Array.isArray(tel.props)) {
+            state.stationProps = tel.props;
+            if (typeof window.syncLivePropsFromTelemetry === 'function') {
+              window.syncLivePropsFromTelemetry(tel.props);
+            }
           }
 
           if (tel && tel.heatmap && tel.heatmap.cells) {
@@ -3205,12 +5329,12 @@
     renderSavedPointsList();
     updateExperimentStateBadge();
 
-    // Center on Franklin's house / South Los Santos on load
-    const initU = (-14.4 - MAP_X_MIN) / WORLD_W;
-    const initV = (MAP_Y_MAX - (-1438.5)) / WORLD_H;
+    // Center on LSIA Station & Street Market on load
+    const initU = (-1335.0 - MAP_X_MIN) / WORLD_W;
+    const initV = (MAP_Y_MAX - (-3052.0)) / WORLD_H;
     state.panX = initU * IMG_DIM;
     state.panY = initV * IMG_DIM;
-    state.zoom = 2.2;
+    state.zoom = 4.5;
     drawMap();
   </script>
 </body>

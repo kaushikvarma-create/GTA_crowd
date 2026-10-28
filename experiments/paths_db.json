@@ -1,3 +1,88 @@
 {
-  "paths": []
+  "paths": [
+    {
+      "id": "path_lsia_station_outbound_market",
+      "name": "🚆 Platform 2 -> Overbridge -> Entrance Hall -> Market -> Road",
+      "origin": {
+        "x": -1344.0,
+        "y": -3032.0,
+        "name": "Platform 2 (Train Arrival)"
+      },
+      "origin_radius": 6.0,
+      "destination": {
+        "x": -1334.0,
+        "y": -3074.0,
+        "name": "Outside Transit Road & Bus Stop"
+      },
+      "destination_radius": 10.0,
+      "waypoints": [
+        { "x": -1336.0, "y": -3034.5 },
+        { "x": -1336.0, "y": -3040.0 },
+        { "x": -1336.0, "y": -3046.5 },
+        { "x": -1334.0, "y": -3053.5 },
+        { "x": -1334.0, "y": -3058.5 },
+        { "x": -1334.0, "y": -3066.0 }
+      ],
+      "speed": 1.5,
+      "behavior": "ROUTE_TRAVEL",
+      "arrival_behavior": "DESPAWN_AT_DEST",
+      "color": "#38bdf8",
+      "created_at": 1730090000.0
+    },
+    {
+      "id": "path_lsia_station_inbound_commuters",
+      "name": "🚌 Outside Road -> Street Market -> Turnstiles -> Overbridge -> Platform 2",
+      "origin": {
+        "x": -1334.0,
+        "y": -3074.0,
+        "name": "Outside Transit Road & Bus Stop"
+      },
+      "origin_radius": 8.0,
+      "destination": {
+        "x": -1344.0,
+        "y": -3032.0,
+        "name": "Platform 2 (Train Boarding)"
+      },
+      "destination_radius": 8.0,
+      "waypoints": [
+        { "x": -1334.0, "y": -3066.0 },
+        { "x": -1334.0, "y": -3058.5 },
+        { "x": -1334.0, "y": -3053.5 },
+        { "x": -1336.0, "y": -3046.5 },
+        { "x": -1336.0, "y": -3040.0 },
+        { "x": -1336.0, "y": -3034.5 }
+      ],
+      "speed": 1.5,
+      "behavior": "ROUTE_TRAVEL",
+      "arrival_behavior": "DESPAWN_AT_DEST",
+      "color": "#10b981",
+      "created_at": 1730090001.0
+    },
+    {
+      "id": "path_lsia_market_shoppers",
+      "name": "⛺ Outside Street Market & Bus Plaza Promenade Loop",
+      "origin": {
+        "x": -1341.0,
+        "y": -3063.5,
+        "name": "West Market Stalls"
+      },
+      "origin_radius": 6.0,
+      "destination": {
+        "x": -1327.0,
+        "y": -3068.5,
+        "name": "East Market Stalls"
+      },
+      "destination_radius": 6.0,
+      "waypoints": [
+        { "x": -1341.0, "y": -3068.5 },
+        { "x": -1334.0, "y": -3073.5 },
+        { "x": -1327.0, "y": -3063.5 }
+      ],
+      "speed": 1.0,
+      "behavior": "ROUTE_TRAVEL",
+      "arrival_behavior": "NEXT_WAYPOINT",
+      "color": "#a855f7",
+      "created_at": 1730090002.0
+    }
+  ]
 }

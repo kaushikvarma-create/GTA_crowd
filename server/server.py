@@ -15,6 +15,7 @@ import threading
 from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 try:
     from http.server import ThreadingHTTPServer as _BaseHTTPServer
@@ -25,7 +26,7 @@ except ImportError:
 
 HOST = "127.0.0.1"
 PORT = 8088
-COMMAND_TIMEOUT_SEC = 6.0
+COMMAND_TIMEOUT_SEC = 15.0
 MAX_QUEUE_SIZE = 128
 MAX_PAYLOAD_BYTES = 256 * 1024  # 256 KB
 
@@ -33,6 +34,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 EXPERIMENTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "experiments")
 PATHS_DB_FILE = os.path.join(EXPERIMENTS_DIR, "paths_db.json")
+STATION_LAYOUTS_DIR = os.path.join(EXPERIMENTS_DIR, "station_layouts")
+MENYOO_SPOONER_DIR = r"D:\Games\Grand Theft Auto V Legacy\menyooStuff\Spooner"
+os.makedirs(STATION_LAYOUTS_DIR, exist_ok=True)
 
 def load_paths_db():
     if not os.path.exists(PATHS_DB_FILE):
@@ -54,6 +58,48 @@ def save_paths_db(paths):
     with open(PATHS_DB_FILE, "w", encoding="utf-8") as f:
         json.dump({"paths": paths}, f, indent=2)
 os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+
+def parse_menyoo_xml(xml_path):
+    """Parse a Menyoo Object Spooner XML layout into CrowdSim station prop dictionaries."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    props = []
+    idx = 0
+    for placement in root.findall(".//Placement"):
+        idx += 1
+        hash_name = (placement.findtext("HashName") or "").strip()
+        model_hash = (placement.findtext("ModelHash") or "").strip()
+        model = hash_name if hash_name else model_hash
+        if not model:
+            continue
+        pos_rot = placement.find("PositionRotation")
+        if pos_rot is None:
+            continue
+        try:
+            x = round(float(pos_rot.findtext("X", "0")), 2)
+            y = round(float(pos_rot.findtext("Y", "0")), 2)
+            z = round(float(pos_rot.findtext("Z", "0")), 2)
+            pitch = round(float(pos_rot.findtext("Pitch", "0")), 1)
+            roll = round(float(pos_rot.findtext("Roll", "0")), 1)
+            yaw = round(float(pos_rot.findtext("Yaw", "0")), 1)
+        except ValueError:
+            continue
+        props.append({
+            "model": model,
+            "label": f"Menyoo [{idx}]: {model}",
+            "zone": "MENYOO_XML",
+            "x": x,
+            "y": y,
+            "z": z,
+            "heading": yaw,
+            "pitch": pitch,
+            "roll": roll
+        })
+    return {
+        "name": os.path.splitext(os.path.basename(xml_path))[0],
+        "source": "Menyoo Object Spooner XML",
+        "props": props
+    }
 
 # Supported commands
 ALLOWED_COMMANDS = {
@@ -78,7 +124,25 @@ ALLOWED_COMMANDS = {
     "GET_TELEMETRY",
     "UPDATE_GROUP",
     "START_GROUP",
-    "PAUSE_GROUP"
+    "PAUSE_GROUP",
+    "TELEPORT_PLAYER",
+    "TOGGLE_NOCLIP",
+    "BUILD_CUSTOM_STATION",
+    "CLEAR_CUSTOM_STATION",
+    "TOGGLE_GOD_MODE",
+    "CLEAR_WANTED_LEVEL",
+    "TOGGLE_NEVER_WANTED",
+    "SPAWN_PROP",
+    "UPDATE_PROP",
+    "DELETE_PROP",
+    "UNDO_PROP",
+    "DELETE_NEAREST_PROP",
+    "GET_ALL_PROPS",
+    "CLEAR_ALL_PROPS",
+    "BATCH_SPAWN_PROPS",
+    "TOGGLE_PROP_BUILDER",
+    "CLONE_PROP",
+    "SAVE_STATION_LAYOUT_DIRECT"
 }
 
 # Supported behaviors
@@ -158,6 +222,8 @@ latest_telemetry = {
     "experiment": {"name": "Default", "state": "STOPPED", "shape": "RECTANGLE"},
     "groups": [],
     "peds": [],
+    "props": [],
+    "prop_builder": {"enabled": False},
     "heatmap": {"grid_resolution": 8.0, "cells": []}
 }
 
@@ -198,6 +264,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+
+        # API: Station Layouts List (supports .json and Menyoo .xml files + live menyooStuff/Spooner)
+        if path == "/api/station/layouts":
+            try:
+                os.makedirs(STATION_LAYOUTS_DIR, exist_ok=True)
+                seen = set()
+                files = []
+                if os.path.isdir(MENYOO_SPOONER_DIR):
+                    for f in sorted(os.listdir(MENYOO_SPOONER_DIR)):
+                        if f.lower().endswith(".xml") and f not in seen:
+                            seen.add(f)
+                            files.append(f)
+                for f in sorted(os.listdir(STATION_LAYOUTS_DIR)):
+                    if f.endswith(".json"):
+                        name_no_ext = f[:-5]
+                        if name_no_ext not in seen:
+                            seen.add(name_no_ext)
+                            files.append(name_no_ext)
+                    elif f.lower().endswith(".xml") and f not in seen:
+                        seen.add(f)
+                        files.append(f)
+                self._send_json(200, {"layouts": files})
+            except Exception as ex:
+                self._send_json(500, {"error": str(ex)})
+            return
 
         # 1. API: Server and Game Status
         if path == "/api/status":
@@ -312,13 +403,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         h_val = round(float(query.get("h", [0.0])[0]), 1)
                         handle_val = int(query.get("handle", [-1])[0])
 
+                        god_val = query.get("god", ["1"])[0] == "1"
+                        wanted_val = query.get("wanted", ["1"])[0] == "1"
+                        fly_val = query.get("fly", ["0"])[0] == "1"
+                        builder_val = query.get("builder", ["0"])[0] == "1"
+
                         latest_telemetry["player"] = {
                             "valid": True,
                             "x": px_val,
                             "y": py_val,
                             "z": pz_val,
                             "heading": h_val,
-                            "handle": handle_val
+                            "handle": handle_val,
+                            "god_mode": god_val,
+                            "never_wanted": wanted_val,
+                            "noclip": fly_val,
+                            "prop_builder": builder_val
                         }
                         latest_telemetry["updated_at"] = now
                     except (ValueError, IndexError):
@@ -426,6 +526,54 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"Invalid JSON payload: {ex}"})
             return
 
+        # API: Station Layout Save & Load
+        if path == "/api/station/save_layout":
+            try:
+                name = str(body_json.get("name", "station_layout")).strip()
+                # Sanitize filename
+                safe_name = "".join([c for c in name if c.isalnum() or c in ("-", "_")]).strip() or "station_layout"
+                props = body_json.get("props", [])
+                file_path = os.path.join(STATION_LAYOUTS_DIR, f"{safe_name}.json")
+                with open(file_path, "w", encoding="utf-8") as lf:
+                    json.dump({"name": name, "props": props}, lf, indent=2)
+                self._send_json(200, {"status": "OK", "saved_name": safe_name, "count": len(props)})
+            except Exception as ex:
+                self._send_json(500, {"error": str(ex)})
+            return
+
+        if path == "/api/station/load_layout":
+            try:
+                name = str(body_json.get("name", "")).strip()
+                if name.lower().endswith(".xml"):
+                    safe_name = "".join([c for c in name[:-4] if c.isalnum() or c in ("-", "_", " ")]).strip()
+                    xml_path = os.path.join(MENYOO_SPOONER_DIR, f"{safe_name}.xml")
+                    if not os.path.exists(xml_path):
+                        xml_path = os.path.join(STATION_LAYOUTS_DIR, f"{safe_name}.xml")
+                    if not os.path.exists(xml_path):
+                        self._send_json(404, {"error": f"Menyoo XML layout '{safe_name}.xml' not found"})
+                        return
+                    data = parse_menyoo_xml(xml_path)
+                    self._send_json(200, {"status": "OK", "layout": data})
+                    return
+
+                safe_name = "".join([c for c in name if c.isalnum() or c in ("-", "_", " ")]).strip()
+                file_path = os.path.join(STATION_LAYOUTS_DIR, f"{safe_name}.json")
+                if not os.path.exists(file_path):
+                    for xml_dir in (MENYOO_SPOONER_DIR, STATION_LAYOUTS_DIR):
+                        xml_alt = os.path.join(xml_dir, f"{safe_name}.xml")
+                        if os.path.exists(xml_alt):
+                            data = parse_menyoo_xml(xml_alt)
+                            self._send_json(200, {"status": "OK", "layout": data})
+                            return
+                    self._send_json(404, {"error": f"Layout '{safe_name}' not found"})
+                    return
+                with open(file_path, "r", encoding="utf-8") as lf:
+                    data = json.load(lf)
+                self._send_json(200, {"status": "OK", "layout": data})
+            except Exception as ex:
+                self._send_json(500, {"error": str(ex)})
+            return
+
         # API: Paths Database Save
         if path == "/api/paths/save":
             path_item = body_json.get("path", body_json)
@@ -518,7 +666,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
 
             # Validation per command
-            if cmd_name == "SPAWN_PED":
+            if cmd_name == "TELEPORT_PLAYER":
+                if "x" not in payload or "y" not in payload:
+                    self._send_json(400, {"error": "'payload' must contain 'x' and 'y' coordinates"})
+                    return
+                try:
+                    payload["x"] = float(payload["x"])
+                    payload["y"] = float(payload["y"])
+                    if "z" in payload and payload["z"] is not None:
+                        payload["z"] = float(payload["z"])
+                except (ValueError, TypeError):
+                    self._send_json(400, {"error": "'x', 'y' (and optional 'z') must be numbers"})
+                    return
+
+            elif cmd_name == "SPAWN_PED":
                 model = payload.get("model", "a_m_y_hipster_01")
                 if not isinstance(model, str) or not model.strip():
                     self._send_json(400, {"error": "'model' must be a non-empty string"})
@@ -791,6 +952,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if "peds" in body_json:
                     latest_telemetry["peds"] = body_json["peds"]
                     has_full = True
+                elif "pedestrians" in body_json:
+                    latest_telemetry["peds"] = body_json["pedestrians"]
+                    has_full = True
+                if "props" in body_json:
+                    latest_telemetry["props"] = body_json["props"]
+                    has_full = True
+                if "prop_builder" in body_json:
+                    latest_telemetry["prop_builder"] = body_json["prop_builder"]
                 if "heatmap" in body_json:
                     latest_telemetry["heatmap"] = body_json["heatmap"]
                     has_full = True

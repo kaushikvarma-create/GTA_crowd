@@ -1,9 +1,12 @@
+using KeyEventArgs = System.Windows.Forms.KeyEventArgs;
+using Keys = System.Windows.Forms.Keys;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -18,9 +21,9 @@ namespace CrowdSim
     {
         #region Constants & Configuration
 
-        // Stage 4 Population Limits & Fair Sharing
-        private const int MaxGroupPopulation = 1000;
-        private const int MaxTotalPopulation = 2000;
+        // Stage 4 Population Limits & Fair Sharing (Unlocked via XtremeTool Runtime Limit Adjuster)
+        private const int MaxGroupPopulation = 5000;
+        private const int MaxTotalPopulation = 10000;
         private const int DefaultGroupSize = 50;
         private const int GlobalSpawnBudgetPerTick = 6; // Fair sharing: max 2 peds created per tick across all groups
 
@@ -41,6 +44,44 @@ namespace CrowdSim
         private readonly Dictionary<string, CrowdGroup> _groups = new Dictionary<string, CrowdGroup>(StringComparer.OrdinalIgnoreCase);
 
         private readonly Random _rng = new Random();
+        private bool _noclipEnabled = false;
+        private bool _godModeEnabled = true;
+        private bool _neverWantedEnabled = true;
+        private bool _propBuilderEnabled = false;
+        private int _previewPropHandle = 0;
+        private string _previewPropModel = "";
+        private int _builderCategoryIdx = 0;
+        private int _builderItemIdx = 0;
+        private float _builderHeading = 0.0f;
+        private float _builderPitch = 0.0f;
+        private float _builderRoll = 0.0f;
+        private float _builderManualZOffset = 0.0f;
+        private float _builderRotStep = 15.0f;
+        private float _builderGridSnap = 0.0f; // 0 = off, 0.25, 0.5, 1.0
+        private bool _builderCloneSideAxis = false;
+        private int _selectedPropHandle = 0;
+        private int _aimedPropHandle = 0;
+        private int _lastPlacedPropHandle = 0;
+        private Vector3 _builderPreviewPos = Vector3.Zero;
+
+        private readonly List<int> _stationPropHandles = new List<int>();
+        private readonly List<int> _propUndoStack = new List<int>();
+        public class CustomPropData
+        {
+            public int Handle;
+            public string Model;
+            public float X;
+            public float Y;
+            public float Z;
+            public float Heading;
+            public float Pitch;
+            public float Roll;
+            public string Zone;
+            public float Width;
+            public float Length;
+            public float Height;
+        }
+        private readonly Dictionary<int, CustomPropData> _customProps = new Dictionary<int, CustomPropData>();
         private readonly Thread _networkThread;
         private volatile bool _isRunning = true;
         private bool _isInitialized = false;
@@ -68,6 +109,11 @@ namespace CrowdSim
             public float Height { get; set; }
             public float Radius { get; set; }
             public bool VehicleCleanup { get; set; }
+            public bool DespawnCheckpointEnabled { get; set; }
+            public Vector3? DespawnCheckpoint { get; set; }
+            public float DespawnRadius { get; set; }
+            public bool ContinuousStream { get; set; }
+            public int ExitedCount { get; set; }
             public float GridResolution { get; set; }
             public bool AllowOutsideRouting { get; set; }
         }
@@ -108,6 +154,7 @@ namespace CrowdSim
         public CrowdSimMain()
         {
             Tick += OnTick;
+            KeyDown += OnKeyDown;
             Aborted += OnAborted;
 
             Log("Script constructor called, starting background communication worker (Stage 4)...");
@@ -121,6 +168,8 @@ namespace CrowdSim
         private void OnAborted(object sender, EventArgs e)
         {
             _isRunning = false;
+            SetNoclip(false);
+            DeletePreviewProp();
 
             try
             {
@@ -170,15 +219,16 @@ namespace CrowdSim
         {
             try
             {
-                // 0. Continuously update cached player position on game thread
+                // 0. Continuously update cached player position, God Mode, Never Wanted & Fly Mode on game thread
                 try
                 {
                     Player curPlayer = Game.Player;
                     if (curPlayer != null && curPlayer.Character != null && curPlayer.Character.Exists())
                     {
-                        Vector3 curPos = curPlayer.Character.Position;
-                        float curHead = curPlayer.Character.Heading;
-                        int curHandle = curPlayer.Character.Handle;
+                        Ped playerPed = curPlayer.Character;
+                        Vector3 curPos = playerPed.Position;
+                        float curHead = playerPed.Heading;
+                        int curHandle = playerPed.Handle;
                         lock (_lock)
                         {
                             _cachedPlayerPos = curPos;
@@ -186,6 +236,73 @@ namespace CrowdSim
                             _cachedPlayerHandle = curHandle;
                             _cachedPlayerValid = true;
                             _lastPlayerUpdateUtc = DateTime.UtcNow;
+                        }
+
+                        // God Mode Enforcement (Immune to bullets, fire, explosions, collision, falls, ragdoll, dismount)
+                        if (_godModeEnabled)
+                        {
+                            Function.Call(Hash.SET_ENTITY_INVINCIBLE, playerPed.Handle, true);
+                            Function.Call(Hash.SET_PLAYER_INVINCIBLE, curPlayer.Handle, true);
+                            Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED, playerPed.Handle, false);
+                            Function.Call(Hash.SET_ENTITY_PROOFS, playerPed.Handle, true, true, true, true, true, true, true, true);
+                            Function.Call(Hash.SET_PED_CAN_RAGDOLL, playerPed.Handle, false);
+                            Function.Call(Hash.SET_PED_CAN_RAGDOLL_FROM_PLAYER_IMPACT, playerPed.Handle, false);
+                            Function.Call(Hash.SET_PED_CAN_BE_KNOCKED_OFF_BIKE, playerPed.Handle, 1);
+                            Function.Call(Hash.SET_PED_CAN_BE_SHOT_IN_VEHICLE, playerPed.Handle, false);
+
+                            if (playerPed.Health < playerPed.MaxHealth)
+                            {
+                                playerPed.Health = playerPed.MaxHealth;
+                            }
+                            if (curPlayer.Character.Armor < 100)
+                            {
+                                curPlayer.Character.Armor = 100;
+                            }
+
+                            if (playerPed.IsInVehicle() && playerPed.CurrentVehicle != null && playerPed.CurrentVehicle.Exists())
+                            {
+                                Vehicle veh = playerPed.CurrentVehicle;
+                                Function.Call(Hash.SET_ENTITY_INVINCIBLE, veh.Handle, true);
+                                Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED, veh.Handle, false);
+                                Function.Call(Hash.SET_VEHICLE_CAN_BE_VISIBLY_DAMAGED, veh.Handle, false);
+                                Function.Call(Hash.SET_VEHICLE_TYRES_CAN_BURST, veh.Handle, false);
+                                Function.Call(Hash.SET_VEHICLE_WHEELS_CAN_BREAK, veh.Handle, false);
+                                if (veh.Health < veh.MaxHealth) veh.Health = veh.MaxHealth;
+                                if (veh.EngineHealth < 1000f) veh.EngineHealth = 1000f;
+                            }
+                        }
+
+                        // Never Wanted / Police Response Suppression
+                        if (_neverWantedEnabled)
+                        {
+                            if (curPlayer.WantedLevel > 0)
+                            {
+                                curPlayer.WantedLevel = 0;
+                            }
+                            Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, curPlayer.Handle);
+                            Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+                            Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, curPlayer.Handle, true);
+                            Function.Call(Hash.SET_DISPATCH_COPS_FOR_PLAYER, curPlayer.Handle, false);
+                            Function.Call(Hash.SET_CREATE_RANDOM_COPS, false);
+                            Function.Call(Hash.SET_CREATE_RANDOM_COPS_NOT_ON_SCENARIOS, false);
+                            Function.Call(Hash.SET_CREATE_RANDOM_COPS_ON_SCENARIOS, false);
+
+                            for (int d = 1; d <= 15; d++)
+                            {
+                                Function.Call(Hash.ENABLE_DISPATCH_SERVICE, d, false);
+                            }
+                        }
+
+                        // Fly Mode / Freecam Movement
+                        if (_noclipEnabled)
+                        {
+                            HandleNoclip(playerPed);
+                        }
+
+                        // In-Game 3D Mod-Menu Prop Builder (F9)
+                        if (_propBuilderEnabled)
+                        {
+                            TickPropBuilder();
                         }
                     }
                 }
@@ -280,8 +397,11 @@ namespace CrowdSim
                         _experiment.CenterY = (float)Math.Round(playerPos.Y, 2);
                         _experiment.CenterZ = (float)Math.Round(playerPos.Z, 2);
 
-                        Notification.PostTicker("~g~[CrowdSim]~s~ Stage 4 Loaded (Map & Routes)", true, true);
-                        Screen.ShowSubtitle("~b~[CrowdSim]~s~ Stage 4 Active", 3000);
+                        // Automatically purge any leftover airport jetbridges/stairs from previous session reloads
+                        PurgeAirportPropsInWorld();
+
+                        Notification.PostTicker("~g~[CrowdSim]~s~ Concrete Station Studio Loaded (F9)", true, true);
+                        GTA.UI.Screen.ShowSubtitle("~b~[CrowdSim]~s~ Concrete Station Builder Ready (Press ~y~F9~s~)", 3500);
                         Log(string.Format("SUCCESS: [CrowdSim] Script loaded successfully! Player handle: {0}, Pos: ({1}, {2}, {3})",
                             player.Character.Handle, _experiment.CenterX, _experiment.CenterY, _experiment.CenterZ));
                     }
@@ -304,11 +424,20 @@ namespace CrowdSim
                     ProcessGameCommand(command);
                 }
 
-                // Suppress ambient civilians during active simulation so all slots belong to CrowdSim
-                if (_experiment.State == "RUNNING")
+                // ALWAYS completely suppress ambient civilian pedestrians and vehicle traffic
+                // so 100% of engine entity slots belong exclusively to CrowdSim pedestrians!
+                Function.Call(Hash.SET_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+                Function.Call(Hash.SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f, 0.0f);
+                Function.Call(Hash.SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+                Function.Call(Hash.SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+                Function.Call(Hash.SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+                Function.Call(Hash.SET_GARBAGE_TRUCKS, false);
+                Function.Call(Hash.SET_RANDOM_BOATS, false);
+
+                if ((DateTime.UtcNow - _lastAmbientSweep).TotalSeconds >= 1.0)
                 {
-                    Function.Call(Hash.SET_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
-                    Function.Call(Hash.SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f, 0.0f);
+                    _lastAmbientSweep = DateTime.UtcNow;
+                    SweepAmbientEntities();
                 }
 
                 // 4. Global Fair Round-Robin Spawner (max 2 peds created per tick across all groups)
@@ -550,6 +679,675 @@ namespace CrowdSim
                         ProcessCleanupVehiclesCommand(cmd);
                         break;
 
+                    case "TELEPORT_PLAYER":
+                        ProcessTeleportPlayerCommand(cmd);
+                        break;
+
+                    case "TOGGLE_NOCLIP":
+                        bool enableNoclip = !_noclipEnabled;
+                        Dictionary<string, object> nDict = cmd.Payload as Dictionary<string, object>;
+                        if (nDict != null && nDict.ContainsKey("enabled"))
+                        {
+                            bool.TryParse(Convert.ToString(nDict["enabled"]), out enableNoclip);
+                        }
+                        SetNoclip(enableNoclip);
+                        Dictionary<string, object> nAck = new Dictionary<string, object>();
+                        nAck["request_id"] = cmd.RequestId;
+                        nAck["command"] = cmd.Command;
+                        nAck["status"] = "ACK";
+                        nAck["noclip_enabled"] = _noclipEnabled;
+                        EnqueueAck(nAck);
+                        break;
+
+                    case "TOGGLE_PROP_BUILDER":
+                        bool enableBuilder = !_propBuilderEnabled;
+                        Dictionary<string, object> pbDict = cmd.Payload as Dictionary<string, object>;
+                        if (pbDict != null && pbDict.ContainsKey("enabled"))
+                        {
+                            bool.TryParse(Convert.ToString(pbDict["enabled"]), out enableBuilder);
+                        }
+                        SetPropBuilderMode(enableBuilder);
+                        Dictionary<string, object> pbAck = new Dictionary<string, object>();
+                        pbAck["request_id"] = cmd.RequestId;
+                        pbAck["command"] = cmd.Command;
+                        pbAck["status"] = "ACK";
+                        pbAck["prop_builder_enabled"] = _propBuilderEnabled;
+                        pbAck["noclip_enabled"] = _noclipEnabled;
+                        EnqueueAck(pbAck);
+                        break;
+
+                    case "SAVE_STATION_LAYOUT_DIRECT":
+                        {
+                            Dictionary<string, object> svDict = cmd.Payload as Dictionary<string, object>;
+                            string layoutName = "Custom_Station_Entity";
+                            if (svDict != null && svDict.ContainsKey("name"))
+                            {
+                                string rawName = Convert.ToString(svDict["name"]).Trim();
+                                if (!string.IsNullOrEmpty(rawName)) layoutName = rawName;
+                            }
+                            int savedCount = SaveStationLayoutDirect(layoutName);
+                            Dictionary<string, object> svAck = new Dictionary<string, object>();
+                            svAck["request_id"] = cmd.RequestId;
+                            svAck["command"] = cmd.Command;
+                            svAck["status"] = "ACK";
+                            svAck["saved_name"] = layoutName;
+                            svAck["count"] = savedCount;
+                            svAck["props"] = GetSerializedCustomPropsList();
+                            EnqueueAck(svAck);
+                            break;
+                        }
+
+                    case "CLONE_PROP":
+                        {
+                            Dictionary<string, object> clpDict = cmd.Payload as Dictionary<string, object>;
+                            int srcId = _selectedPropHandle != 0 ? _selectedPropHandle : _lastPlacedPropHandle;
+                            bool sideAxis = _builderCloneSideAxis;
+                            float sign = 1.0f;
+                            if (clpDict != null)
+                            {
+                                if (clpDict.ContainsKey("id")) int.TryParse(Convert.ToString(clpDict["id"]), out srcId);
+                                if (clpDict.ContainsKey("side_axis")) bool.TryParse(Convert.ToString(clpDict["side_axis"]), out sideAxis);
+                                if (clpDict.ContainsKey("direction")) float.TryParse(Convert.ToString(clpDict["direction"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sign);
+                            }
+                            CustomPropData cloned = ClonePropById(srcId, sideAxis, sign);
+                            Dictionary<string, object> clpAck = new Dictionary<string, object>();
+                            clpAck["request_id"] = cmd.RequestId;
+                            clpAck["command"] = cmd.Command;
+                            if (cloned != null)
+                            {
+                                clpAck["status"] = "ACK";
+                                clpAck["prop"] = SerializeCustomProp(cloned);
+                            }
+                            else
+                            {
+                                clpAck["status"] = "ERROR";
+                                clpAck["message"] = "Could not clone prop ID " + srcId;
+                            }
+                            EnqueueAck(clpAck);
+                            break;
+                        }
+
+                    case "BUILD_CUSTOM_STATION":
+                        float sbx = -1340.0f, sby = -3040.0f, sbz = 13.95f;
+                        Dictionary<string, object> bDict = cmd.Payload as Dictionary<string, object>;
+                        if (bDict != null)
+                        {
+                            if (bDict.ContainsKey("x")) float.TryParse(Convert.ToString(bDict["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sbx);
+                            if (bDict.ContainsKey("y")) float.TryParse(Convert.ToString(bDict["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sby);
+                            if (bDict.ContainsKey("z")) float.TryParse(Convert.ToString(bDict["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out sbz);
+                        }
+                        int propsBuilt = BuildCustomStation(sbx, sby, sbz);
+                        Dictionary<string, object> bAck = new Dictionary<string, object>();
+                        bAck["request_id"] = cmd.RequestId;
+                        bAck["command"] = cmd.Command;
+                        bAck["status"] = "ACK";
+                        bAck["props_built"] = propsBuilt;
+                        bAck["station_center"] = new Dictionary<string, object> { { "x", sbx }, { "y", sby }, { "z", sbz } };
+                        EnqueueAck(bAck);
+                        break;
+
+                    case "CLEAR_CUSTOM_STATION":
+                    case "CLEAR_ALL_PROPS":
+                        ClearStationProps();
+                        Dictionary<string, object> cAck = new Dictionary<string, object>();
+                        cAck["request_id"] = cmd.RequestId;
+                        cAck["command"] = cmd.Command;
+                        cAck["status"] = "ACK";
+                        EnqueueAck(cAck);
+                        break;
+
+                    case "SPAWN_PROP":
+                        {
+                            Dictionary<string, object> sDict = cmd.Payload as Dictionary<string, object>;
+                            string pModel = "prop_portacabin01";
+                            string pZone = "Custom";
+                            float px = 0f, py = 0f, pz = 0f, pHeading = 0f, pPitch = 0f, pRoll = 0f;
+                            bool hasCoords = false;
+                            bool snapSurface = false;
+                            if (sDict != null)
+                            {
+                                if (sDict.ContainsKey("model")) pModel = Convert.ToString(sDict["model"]);
+                                if (sDict.ContainsKey("zone")) pZone = Convert.ToString(sDict["zone"]);
+                                if (sDict.ContainsKey("x") && sDict.ContainsKey("y") && sDict.ContainsKey("z"))
+                                {
+                                    float.TryParse(Convert.ToString(sDict["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out px);
+                                    float.TryParse(Convert.ToString(sDict["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out py);
+                                    float.TryParse(Convert.ToString(sDict["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pz);
+                                    hasCoords = true;
+                                }
+                                if (sDict.ContainsKey("heading"))
+                                {
+                                    float.TryParse(Convert.ToString(sDict["heading"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pHeading);
+                                }
+                                if (sDict.ContainsKey("pitch"))
+                                {
+                                    float.TryParse(Convert.ToString(sDict["pitch"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pPitch);
+                                }
+                                if (sDict.ContainsKey("roll"))
+                                {
+                                    float.TryParse(Convert.ToString(sDict["roll"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pRoll);
+                                }
+                                if (sDict.ContainsKey("snap_surface"))
+                                {
+                                    bool.TryParse(Convert.ToString(sDict["snap_surface"]), out snapSurface);
+                                }
+                            }
+
+                            if (!hasCoords)
+                            {
+                                Ped ply = Game.Player != null ? Game.Player.Character : null;
+                                if (ply != null && ply.Exists())
+                                {
+                                    Vector3 fwd = ply.ForwardVector;
+                                    Vector3 spawnPos = ply.Position + fwd * 4.0f;
+                                    px = spawnPos.X;
+                                    py = spawnPos.Y;
+                                    pz = spawnPos.Z;
+                                    pHeading = ply.Heading;
+                                    snapSurface = true;
+                                }
+                            }
+
+                            if (snapSurface)
+                            {
+                                float sZ;
+                                if (TryGetPreciseSurfaceZ(px, py, pz + 3.0f, out sZ)) pz = sZ;
+                            }
+
+                            Dictionary<string, object> pAck = new Dictionary<string, object>();
+                            pAck["request_id"] = cmd.RequestId;
+                            pAck["command"] = cmd.Command;
+
+                            if (pModel.StartsWith("prefab_", StringComparison.OrdinalIgnoreCase))
+                            {
+                                int builtCount = SpawnConcretePrefab(pModel, new Vector3(px, py, pz), pHeading, pZone);
+                                if (builtCount > 0 && _lastPlacedPropHandle != 0 && _customProps.ContainsKey(_lastPlacedPropHandle))
+                                {
+                                    pAck["status"] = "ACK";
+                                    pAck["spawned_count"] = builtCount;
+                                    pAck["prop"] = SerializeCustomProp(_customProps[_lastPlacedPropHandle]);
+                                    GTA.UI.Screen.ShowSubtitle(string.Format("~g~Built Concrete Prefab {0} ({1} blocks)~s~", pModel, builtCount), 2500);
+                                }
+                                else
+                                {
+                                    pAck["status"] = "ERROR";
+                                    pAck["message"] = "Failed to spawn concrete prefab: " + pModel;
+                                }
+                                EnqueueAck(pAck);
+                                break;
+                            }
+
+                            Model m = new Model(pModel);
+                            if (!m.IsValid)
+                            {
+                                pAck["status"] = "ERROR";
+                                pAck["message"] = "Invalid model name: " + pModel;
+                            }
+                            else
+                            {
+                                m.Request(1500);
+                                if (!m.IsLoaded)
+                                {
+                                    pAck["status"] = "ERROR";
+                                    pAck["message"] = "Model failed to load: " + pModel;
+                                }
+                                else
+                                {
+                                    Prop p = CreateConfiguredStationProp(m, pModel, new Vector3(px, py, pz), new Vector3(pPitch, pRoll, pHeading), pZone);
+                                    if (p != null && p.Exists())
+                                    {
+                                        CustomPropData cpd = _customProps[p.Handle];
+                                        _lastPlacedPropHandle = p.Handle;
+                                        _selectedPropHandle = p.Handle;
+                                        pAck["status"] = "ACK";
+                                        pAck["prop"] = SerializeCustomProp(cpd);
+                                        GTA.UI.Screen.ShowSubtitle("~g~Spawned: " + pModel + " [ID: " + p.Handle + "]~s~", 2000);
+                                    }
+                                    else
+                                    {
+                                        pAck["status"] = "ERROR";
+                                        pAck["message"] = "World.CreateProp returned null";
+                                    }
+                                }
+                            }
+                            EnqueueAck(pAck);
+                            break;
+                        }
+
+                    case "UPDATE_PROP":
+                        {
+                            Dictionary<string, object> uDict = cmd.Payload as Dictionary<string, object>;
+                            int propId = 0;
+                            float ux = 0f, uy = 0f, uz = 0f, uHead = 0f, uPitch = 0f, uRoll = 0f;
+                            bool hasPos = false;
+                            bool hasPitchRoll = false;
+                            bool snap = false;
+                            if (uDict != null)
+                            {
+                                if (uDict.ContainsKey("id")) int.TryParse(Convert.ToString(uDict["id"]), out propId);
+                                if (uDict.ContainsKey("x")) { float.TryParse(Convert.ToString(uDict["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out ux); hasPos = true; }
+                                if (uDict.ContainsKey("y")) { float.TryParse(Convert.ToString(uDict["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out uy); hasPos = true; }
+                                if (uDict.ContainsKey("z")) { float.TryParse(Convert.ToString(uDict["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out uz); hasPos = true; }
+                                if (uDict.ContainsKey("heading")) { float.TryParse(Convert.ToString(uDict["heading"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out uHead); }
+                                if (uDict.ContainsKey("pitch")) { float.TryParse(Convert.ToString(uDict["pitch"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out uPitch); hasPitchRoll = true; }
+                                if (uDict.ContainsKey("roll")) { float.TryParse(Convert.ToString(uDict["roll"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out uRoll); hasPitchRoll = true; }
+                                if (uDict.ContainsKey("snap_surface")) { bool.TryParse(Convert.ToString(uDict["snap_surface"]), out snap); }
+                            }
+
+                            Dictionary<string, object> uAck = new Dictionary<string, object>();
+                            uAck["request_id"] = cmd.RequestId;
+                            uAck["command"] = cmd.Command;
+
+                            Entity ent = Entity.FromHandle(propId);
+                            if (ent != null && ent.Exists())
+                            {
+                                if (snap)
+                                {
+                                    float sZ;
+                                    if (TryGetPreciseSurfaceZ(ux, uy, uz + 3.0f, out sZ)) uz = sZ;
+                                }
+                                if (hasPos)
+                                {
+                                    Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, ux, uy, uz, false, false, false);
+                                }
+                                if (hasPitchRoll)
+                                {
+                                    ent.Rotation = new Vector3(uPitch, uRoll, uHead);
+                                }
+                                else
+                                {
+                                    ent.Heading = uHead;
+                                }
+                                ent.IsPositionFrozen = true;
+
+                                CustomPropData updatedCpd = null;
+                                lock (_lock)
+                                {
+                                    if (!_customProps.ContainsKey(propId))
+                                    {
+                                        float pw, pl, ph;
+                                        GetModelSize(ent.Model, out pw, out pl, out ph);
+                                        _customProps[propId] = new CustomPropData
+                                        {
+                                            Handle = propId,
+                                            Model = ResolvePropModelName(ent.Model.Hash),
+                                            X = ent.Position.X,
+                                            Y = ent.Position.Y,
+                                            Z = ent.Position.Z,
+                                            Heading = ent.Heading,
+                                            Pitch = ent.Rotation.X,
+                                            Roll = ent.Rotation.Y,
+                                            Zone = "Menyoo",
+                                            Width = pw,
+                                            Length = pl,
+                                            Height = ph
+                                        };
+                                    }
+                                    if (_customProps.ContainsKey(propId))
+                                    {
+                                        _customProps[propId].X = ux;
+                                        _customProps[propId].Y = uy;
+                                        _customProps[propId].Z = uz;
+                                        _customProps[propId].Heading = uHead;
+                                        if (hasPitchRoll)
+                                        {
+                                            _customProps[propId].Pitch = uPitch;
+                                            _customProps[propId].Roll = uRoll;
+                                        }
+                                        updatedCpd = _customProps[propId];
+                                    }
+                                }
+                                _selectedPropHandle = propId;
+                                uAck["status"] = "ACK";
+                                uAck["prop"] = updatedCpd != null ? SerializeCustomProp(updatedCpd) : new Dictionary<string, object> {
+                                    { "id", propId },
+                                    { "x", ux },
+                                    { "y", uy },
+                                    { "z", uz },
+                                    { "heading", uHead }
+                                };
+                            }
+                            else
+                            {
+                                uAck["status"] = "ERROR";
+                                uAck["message"] = "Prop with ID " + propId + " not found";
+                            }
+                            EnqueueAck(uAck);
+                            break;
+                        }
+
+                    case "DELETE_PROP":
+                        {
+                            Dictionary<string, object> dDict = cmd.Payload as Dictionary<string, object>;
+                            int delId = 0;
+                            if (dDict != null && dDict.ContainsKey("id")) int.TryParse(Convert.ToString(dDict["id"]), out delId);
+
+                            Dictionary<string, object> dAck = new Dictionary<string, object>();
+                            dAck["request_id"] = cmd.RequestId;
+                            dAck["command"] = cmd.Command;
+
+                            string delModel = "Prop";
+                            lock (_lock)
+                            {
+                                if (_customProps.ContainsKey(delId)) delModel = _customProps[delId].Model;
+                            }
+                            ForceDeletePropEntity(delId);
+                            dAck["status"] = "ACK";
+                            dAck["deleted_id"] = delId;
+                            dAck["deleted_model"] = delModel;
+                            dAck["props"] = GetSerializedCustomPropsList();
+                            GTA.UI.Screen.ShowSubtitle("~r~Deleted " + delModel + " [ID: " + delId + "]~s~", 1800);
+                            EnqueueAck(dAck);
+                            break;
+                        }
+
+                    case "UNDO_PROP":
+                        {
+                            Dictionary<string, object> unAck = new Dictionary<string, object>();
+                            unAck["request_id"] = cmd.RequestId;
+                            unAck["command"] = cmd.Command;
+
+                            int undoneId;
+                            string undoneModel;
+                            if (UndoLastProp(out undoneId, out undoneModel))
+                            {
+                                unAck["status"] = "ACK";
+                                unAck["deleted_id"] = undoneId;
+                                unAck["deleted_model"] = undoneModel;
+                                unAck["props"] = GetSerializedCustomPropsList();
+                            }
+                            else
+                            {
+                                unAck["status"] = "ERROR";
+                                unAck["message"] = "No placed props left to undo.";
+                                unAck["props"] = GetSerializedCustomPropsList();
+                            }
+                            EnqueueAck(unAck);
+                            break;
+                        }
+
+                    case "DELETE_NEAREST_PROP":
+                        {
+                            Dictionary<string, object> dnDict = cmd.Payload as Dictionary<string, object>;
+                            float maxRad = 60.0f;
+                            if (dnDict != null && dnDict.ContainsKey("radius"))
+                            {
+                                float.TryParse(Convert.ToString(dnDict["radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out maxRad);
+                            }
+
+                            Dictionary<string, object> dnAck = new Dictionary<string, object>();
+                            dnAck["request_id"] = cmd.RequestId;
+                            dnAck["command"] = cmd.Command;
+
+                            int nearId;
+                            string nearModel;
+                            float nearDist;
+                            if (DeleteNearestProp(maxRad, out nearId, out nearModel, out nearDist))
+                            {
+                                dnAck["status"] = "ACK";
+                                dnAck["deleted_id"] = nearId;
+                                dnAck["deleted_model"] = nearModel;
+                                dnAck["distance"] = Math.Round(nearDist, 2);
+                                dnAck["props"] = GetSerializedCustomPropsList();
+                            }
+                            else
+                            {
+                                dnAck["status"] = "ERROR";
+                                dnAck["message"] = "No prop found within " + maxRad.ToString("F0") + "m of player.";
+                                dnAck["props"] = GetSerializedCustomPropsList();
+                            }
+                            EnqueueAck(dnAck);
+                            break;
+                        }
+
+                    case "GET_ALL_PROPS":
+                        {
+                            SyncWorldPropsWithManager();
+                            Dictionary<string, object> aAck = new Dictionary<string, object>();
+                            aAck["request_id"] = cmd.RequestId;
+                            aAck["command"] = cmd.Command;
+                            aAck["status"] = "ACK";
+                            aAck["prop_builder_enabled"] = _propBuilderEnabled;
+                            aAck["selected_prop_id"] = _selectedPropHandle;
+                            aAck["props"] = GetSerializedCustomPropsList();
+                            EnqueueAck(aAck);
+                            break;
+                        }
+
+                    case "BATCH_SPAWN_PROPS":
+                        {
+                            Dictionary<string, object> batDict = cmd.Payload as Dictionary<string, object>;
+                            bool clearFirst = true;
+                            bool spawnAtPlayer = false;
+                            float offsetDist = 10.0f;
+                            var rawProps = batDict != null && batDict.ContainsKey("props") ? batDict["props"] as System.Collections.ArrayList : null;
+                            if (batDict != null && batDict.ContainsKey("clear_first"))
+                            {
+                                bool.TryParse(Convert.ToString(batDict["clear_first"]), out clearFirst);
+                            }
+                            if (batDict != null && batDict.ContainsKey("spawn_at_player"))
+                            {
+                                bool.TryParse(Convert.ToString(batDict["spawn_at_player"]), out spawnAtPlayer);
+                            }
+                            if (batDict != null && batDict.ContainsKey("offset_distance"))
+                            {
+                                float.TryParse(Convert.ToString(batDict["offset_distance"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out offsetDist);
+                            }
+                            if (clearFirst)
+                            {
+                                ClearStationProps();
+                            }
+
+                            int bCount = 0;
+                            var resultList = new List<Dictionary<string, object>>();
+
+                            if (rawProps != null && rawProps.Count > 0)
+                            {
+                                float shiftX = 0f, shiftY = 0f, shiftZ = 0f;
+                                if (spawnAtPlayer && Game.Player != null && Game.Player.Character != null && Game.Player.Character.Exists())
+                                {
+                                    Ped ply = Game.Player.Character;
+                                    Vector3 targetAnchor = ply.Position + ply.ForwardVector * offsetDist;
+                                    float groundZ;
+                                    if (TryGetPreciseSurfaceZ(targetAnchor.X, targetAnchor.Y, targetAnchor.Z + 5.0f, out groundZ))
+                                    {
+                                        targetAnchor.Z = groundZ;
+                                    }
+
+                                    float sumX = 0f, sumY = 0f, minZ = float.MaxValue;
+                                    int validPts = 0;
+                                    foreach (object item in rawProps)
+                                    {
+                                        Dictionary<string, object> pItem = item as Dictionary<string, object>;
+                                        if (pItem == null) continue;
+                                        float ix = 0f, iy = 0f, iz = 0f;
+                                        if (pItem.ContainsKey("x")) float.TryParse(Convert.ToString(pItem["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out ix);
+                                        if (pItem.ContainsKey("y")) float.TryParse(Convert.ToString(pItem["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out iy);
+                                        if (pItem.ContainsKey("z")) float.TryParse(Convert.ToString(pItem["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out iz);
+                                        sumX += ix;
+                                        sumY += iy;
+                                        if (iz < minZ) minZ = iz;
+                                        validPts++;
+                                    }
+                                    if (validPts > 0)
+                                    {
+                                        float avgX = sumX / validPts;
+                                        float avgY = sumY / validPts;
+                                        shiftX = targetAnchor.X - avgX;
+                                        shiftY = targetAnchor.Y - avgY;
+                                        shiftZ = targetAnchor.Z - (minZ < float.MaxValue ? minZ : 0f);
+                                    }
+                                }
+
+                                HashSet<string> uniqueModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                foreach (object item in rawProps)
+                                {
+                                    Dictionary<string, object> pItem = item as Dictionary<string, object>;
+                                    if (pItem != null && pItem.ContainsKey("model"))
+                                    {
+                                        uniqueModels.Add(Convert.ToString(pItem["model"]));
+                                    }
+                                }
+
+                                foreach (string mName in uniqueModels)
+                                {
+                                    try
+                                    {
+                                        Model m = new Model(mName);
+                                        if (m.IsValid) m.Request(1000);
+                                    }
+                                    catch { }
+                                }
+
+                                foreach (object item in rawProps)
+                                {
+                                    Dictionary<string, object> pItem = item as Dictionary<string, object>;
+                                    if (pItem == null) continue;
+                                    string pModel = Convert.ToString(pItem["model"]);
+                                    string pZone = pItem.ContainsKey("zone") ? Convert.ToString(pItem["zone"]) : "Station";
+                                    float px = 0f, py = 0f, pz = 0f, pHeading = 0f, pPitch = 0f, pRoll = 0f;
+                                    if (pItem.ContainsKey("x")) float.TryParse(Convert.ToString(pItem["x"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out px);
+                                    if (pItem.ContainsKey("y")) float.TryParse(Convert.ToString(pItem["y"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out py);
+                                    if (pItem.ContainsKey("z")) float.TryParse(Convert.ToString(pItem["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pz);
+                                    if (pItem.ContainsKey("heading")) float.TryParse(Convert.ToString(pItem["heading"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pHeading);
+                                    if (pItem.ContainsKey("pitch")) float.TryParse(Convert.ToString(pItem["pitch"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pPitch);
+                                    if (pItem.ContainsKey("roll")) float.TryParse(Convert.ToString(pItem["roll"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out pRoll);
+
+                                    px += shiftX;
+                                    py += shiftY;
+                                    pz += shiftZ;
+
+                                    try
+                                    {
+                                        Model m = new Model(pModel);
+                                        if (m.IsLoaded || m.Request(250))
+                                        {
+                                            Prop p = CreateConfiguredStationProp(m, pModel, new Vector3(px, py, pz), new Vector3(pPitch, pRoll, pHeading), pZone);
+                                            if (p != null && p.Exists())
+                                            {
+                                                resultList.Add(SerializeCustomProp(_customProps[p.Handle]));
+                                                bCount++;
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+
+                            Dictionary<string, object> batAck = new Dictionary<string, object>();
+                            batAck["request_id"] = cmd.RequestId;
+                            batAck["command"] = cmd.Command;
+                            batAck["status"] = "ACK";
+                            batAck["spawned_count"] = bCount;
+                            batAck["spawned_at_player"] = spawnAtPlayer;
+                            batAck["props"] = GetSerializedCustomPropsList();
+                            GTA.UI.Screen.ShowSubtitle(spawnAtPlayer
+                                ? string.Format("~g~Spawned Composite Entity ({0} props) at Player!~s~", bCount)
+                                : string.Format("~g~Batch Spawned {0} Props!~s~", bCount), 2500);
+                            EnqueueAck(batAck);
+                            break;
+                        }
+
+                    case "TOGGLE_GOD_MODE":
+                        bool enableGod = !_godModeEnabled;
+                        Dictionary<string, object> godDict = cmd.Payload as Dictionary<string, object>;
+                        if (godDict != null && godDict.ContainsKey("enabled"))
+                        {
+                            bool.TryParse(Convert.ToString(godDict["enabled"]), out enableGod);
+                        }
+                        _godModeEnabled = enableGod;
+                        Player curP = Game.Player;
+                        if (curP != null && curP.Character != null && curP.Character.Exists())
+                        {
+                            Ped pp = curP.Character;
+                            if (!_godModeEnabled)
+                            {
+                                Function.Call(Hash.SET_ENTITY_INVINCIBLE, pp.Handle, false);
+                                Function.Call(Hash.SET_PLAYER_INVINCIBLE, curP.Handle, false);
+                                Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED, pp.Handle, true);
+                                Function.Call(Hash.SET_ENTITY_PROOFS, pp.Handle, false, false, false, false, false, false, false, false);
+                                Function.Call(Hash.SET_PED_CAN_RAGDOLL, pp.Handle, true);
+                                Function.Call(Hash.SET_PED_CAN_RAGDOLL_FROM_PLAYER_IMPACT, pp.Handle, true);
+                            }
+                        }
+                        GTA.UI.Screen.ShowSubtitle(_godModeEnabled ? "~g~God Mode: ON (Invincible)~s~" : "~y~God Mode: OFF~s~", 2500);
+                        Dictionary<string, object> gAck = new Dictionary<string, object>();
+                        gAck["request_id"] = cmd.RequestId;
+                        gAck["command"] = cmd.Command;
+                        gAck["status"] = "ACK";
+                        gAck["god_mode_enabled"] = _godModeEnabled;
+                        EnqueueAck(gAck);
+                        break;
+
+                    case "CLEAR_WANTED_LEVEL":
+                        Player cp = Game.Player;
+                        if (cp != null)
+                        {
+                            cp.WantedLevel = 0;
+                            Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, cp.Handle);
+                            Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+                            Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, cp.Handle, true);
+                            Function.Call(Hash.SET_DISPATCH_COPS_FOR_PLAYER, cp.Handle, false);
+                            Function.Call(Hash.SET_CREATE_RANDOM_COPS, false);
+                            for (int d = 1; d <= 15; d++)
+                            {
+                                Function.Call(Hash.ENABLE_DISPATCH_SERVICE, d, false);
+                            }
+                        }
+                        GTA.UI.Screen.ShowSubtitle("~g~Wanted Level Cleared & Police Suppressed~s~", 2500);
+                        Dictionary<string, object> clAck = new Dictionary<string, object>();
+                        clAck["request_id"] = cmd.RequestId;
+                        clAck["command"] = cmd.Command;
+                        clAck["status"] = "ACK";
+                        clAck["wanted_level"] = 0;
+                        EnqueueAck(clAck);
+                        break;
+
+                    case "TOGGLE_NEVER_WANTED":
+                        bool enableNever = !_neverWantedEnabled;
+                        Dictionary<string, object> nwDict = cmd.Payload as Dictionary<string, object>;
+                        if (nwDict != null && nwDict.ContainsKey("enabled"))
+                        {
+                            bool.TryParse(Convert.ToString(nwDict["enabled"]), out enableNever);
+                        }
+                        _neverWantedEnabled = enableNever;
+                        Player nPlayer = Game.Player;
+                        if (nPlayer != null)
+                        {
+                            if (_neverWantedEnabled)
+                            {
+                                nPlayer.WantedLevel = 0;
+                                Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, nPlayer.Handle);
+                                Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+                                Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, nPlayer.Handle, true);
+                                Function.Call(Hash.SET_DISPATCH_COPS_FOR_PLAYER, nPlayer.Handle, false);
+                                Function.Call(Hash.SET_CREATE_RANDOM_COPS, false);
+                                for (int d = 1; d <= 15; d++)
+                                {
+                                    Function.Call(Hash.ENABLE_DISPATCH_SERVICE, d, false);
+                                }
+                            }
+                            else
+                            {
+                                Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
+                                Function.Call(Hash.SET_POLICE_IGNORE_PLAYER, nPlayer.Handle, false);
+                                Function.Call(Hash.SET_DISPATCH_COPS_FOR_PLAYER, nPlayer.Handle, true);
+                                Function.Call(Hash.SET_CREATE_RANDOM_COPS, true);
+                                for (int d = 1; d <= 15; d++)
+                                {
+                                    Function.Call(Hash.ENABLE_DISPATCH_SERVICE, d, true);
+                                }
+                            }
+                        }
+                        GTA.UI.Screen.ShowSubtitle(_neverWantedEnabled ? "~g~Never Wanted: ON (0 Stars Locked)~s~" : "~y~Never Wanted: OFF~s~", 2500);
+                        Dictionary<string, object> nwAck = new Dictionary<string, object>();
+                        nwAck["request_id"] = cmd.RequestId;
+                        nwAck["command"] = cmd.Command;
+                        nwAck["status"] = "ACK";
+                        nwAck["never_wanted_enabled"] = _neverWantedEnabled;
+                        EnqueueAck(nwAck);
+                        break;
+
                     case "GET_TELEMETRY":
                         ProcessGetTelemetryCommand(cmd);
                         break;
@@ -565,6 +1363,2072 @@ namespace CrowdSim
                 SendErrorAck(cmd, "Unhandled exception: " + ex.Message);
             }
         }
+
+                private void ProcessTeleportPlayerCommand(CommandItem cmd)
+        {
+            try
+            {
+                Dictionary<string, object> payload = cmd.Payload as Dictionary<string, object>;
+                if (payload == null || !payload.ContainsKey("x") || !payload.ContainsKey("y"))
+                {
+                    SendErrorAck(cmd, "Payload missing 'x' or 'y' coordinates");
+                    return;
+                }
+
+                float x = Convert.ToSingle(payload["x"], CultureInfo.InvariantCulture);
+                float y = Convert.ToSingle(payload["y"], CultureInfo.InvariantCulture);
+                float? explicitZ = null;
+                if (payload.ContainsKey("z") && payload["z"] != null)
+                {
+                    float parsedZ;
+                    if (float.TryParse(Convert.ToString(payload["z"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out parsedZ))
+                    {
+                        explicitZ = parsedZ;
+                    }
+                }
+
+                Ped player = Game.Player.Character;
+                if (player == null || !player.Exists())
+                {
+                    SendErrorAck(cmd, "Player ped is not active in GTA V");
+                    return;
+                }
+
+                Entity targetEntity = (player.IsInVehicle() && player.CurrentVehicle != null)
+                    ? (Entity)player.CurrentVehicle
+                    : (Entity)player;
+
+                // 1. FREEZE ENTITY IMMEDIATELY to prevent falling/ragdoll while streaming collision
+                targetEntity.IsPositionFrozen = true;
+                targetEntity.Velocity = Vector3.Zero;
+
+                // 2. Pre-position entity to focus engine streaming cell
+                float startZ = explicitZ.HasValue ? explicitZ.Value : 50.0f;
+                targetEntity.Position = new Vector3(x, y, startZ);
+                Function.Call(Hash.SET_FOCUS_POS_AND_VEL, x, y, startZ, 0f, 0f, 0f);
+
+                // Request high-priority collision streaming around destination
+                Function.Call(Hash.REQUEST_COLLISION_AT_COORD, x, y, startZ);
+                Function.Call(Hash.NEW_LOAD_SCENE_START_SPHERE, x, y, startZ, 60.0f, 0);
+
+                // 3. Active probe loop: wait while frozen until ground or prop surface is confirmed loaded
+                float resolvedSurfaceZ = -999.0f;
+                DateTime deadline = DateTime.UtcNow.AddSeconds(2.0); // max 2s streaming window
+
+                while (DateTime.UtcNow < deadline)
+                {
+                    Function.Call(Hash.REQUEST_COLLISION_AT_COORD, x, y, startZ);
+                    Function.Call(Hash.LOAD_ALL_OBJECTS_NOW);
+
+                    float foundZ;
+                    if (TryGetPreciseSurfaceZ(x, y, explicitZ, out foundZ))
+                    {
+                        resolvedSurfaceZ = foundZ;
+                        break; // Solid surface confirmed ready!
+                    }
+
+                    Script.Wait(50);
+                }
+
+                Function.Call(Hash.NEW_LOAD_SCENE_STOP);
+
+                if (resolvedSurfaceZ <= -50.0f)
+                {
+                    resolvedSurfaceZ = explicitZ.HasValue ? explicitZ.Value : 15.0f;
+                }
+
+                // 4. Place entity gently directly on top of the surface
+                float finalZ = resolvedSurfaceZ + 0.15f;
+                targetEntity.Position = new Vector3(x, y, finalZ);
+                targetEntity.Velocity = Vector3.Zero;
+
+                // 5. Unfreeze entity now that collision is 100% solid
+                targetEntity.IsPositionFrozen = false;
+                Function.Call(Hash.CLEAR_FOCUS);
+
+                Log(string.Format("INFO: Teleported entity to surface at ({0:F1}, {1:F1}, {2:F1})", x, y, finalZ));
+
+                Dictionary<string, object> ackData = new Dictionary<string, object>();
+                ackData["request_id"] = cmd.RequestId;
+                ackData["command"] = cmd.Command;
+                ackData["status"] = "ACK";
+                ackData["game_time"] = Game.GameTime;
+                ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
+                Dictionary<string, object> posDict = new Dictionary<string, object>();
+                posDict["x"] = Math.Round(x, 1);
+                posDict["y"] = Math.Round(y, 1);
+                posDict["z"] = Math.Round(finalZ, 1);
+                ackData["teleported_to"] = posDict;
+
+                EnqueueAck(ackData);
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("ERROR: Teleport failed: {0}", ex.Message));
+                SendErrorAck(cmd, "Teleport exception: " + ex.Message);
+            }
+        }
+
+        
+        #region God Mode, Fly Mode & Custom Station Builder
+
+        private class BuilderCatalogCategory
+        {
+            public string Name;
+            public string ZoneTag;
+            public List<Tuple<string, string>> Items; // (ModelName, DisplayLabel)
+        }
+
+        private int _builderTextureVariation = 2; // Menyoo _SET_OBJECT_TEXTURE_VARIATION (concrete/grey default)
+        private string _sampledCustomModelName = null;
+        private Vector3 _previewModelDims = new Vector3(2f, 2f, 2f);
+
+        private readonly List<BuilderCatalogCategory> _builderCatalog = new List<BuilderCatalogCategory>
+        {
+            new BuilderCatalogCategory
+            {
+                Name = "1. Stations of SA & Sandy Shores (Custom)",
+                ZoneTag = "Custom_Station",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("prop_walkway1", "SOSA Concrete Foot-Overbridge w/ Stairs & Arches"),
+                    Tuple.Create("prop_trainstation2", "SOSA Full Railway Platform w/ Curved Canopy"),
+                    Tuple.Create("prop_trainstation1", "SOSA Full Train Station Platform Variant 1"),
+                    Tuple.Create("prop_trainstation3", "SOSA Full Train Station Platform Variant 3"),
+                    Tuple.Create("prop_traincrossing1", "SOSA Railway Track Crossing & Connector"),
+                    Tuple.Create("prop_fib_wallfrag01", "Sandy Shores Concrete Platform Floor Slab"),
+                    Tuple.Create("prop_test_elevator", "Sandy Shores Overbridge Elevator Shaft"),
+                    Tuple.Create("prop_rf_conc_pillar", "Sandy Shores Heavy Concrete Bridge Pillar"),
+                    Tuple.Create("port_xr_stairs_01", "Sandy Shores Full Station Staircase"),
+                    Tuple.Create("prop_train_ticket_02", "Official Train Ticket Machine")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "2. Full-Size Overbridges & Decks (FOB)",
+                ZoneTag = "FOB_Bridge",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("prop_gate_bridge_ld", "Full-Size Overpass Bridge Span"),
+                    Tuple.Create("stt_prop_stunt_track_dwshort", "Full-Size Elevated Bridge w/ Side Walls"),
+                    Tuple.Create("stt_prop_stunt_track_straight", "Long Elevated Highway / Bridge Span"),
+                    Tuple.Create("bkr_prop_biker_bblock_sml2", "Full-Size Monolithic Concrete Bridge Deck"),
+                    Tuple.Create("stt_prop_stunt_bblock_mdm2", "Wide Flat Elevated Bridge Deck Slab"),
+                    Tuple.Create("prop_container_03a", "Enclosed Walk-Through Skybridge Corridor")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "2. Full-Size Platforms & Concrete Slabs",
+                ZoneTag = "Platform",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("bkr_prop_biker_bblock_lrg1", "Full-Size Concrete Train Platform (Large)"),
+                    Tuple.Create("bkr_prop_biker_bblock_mdm1", "Full-Size Concrete Train Platform (Medium)"),
+                    Tuple.Create("bkr_prop_biker_bblock_sml1", "Full-Size Concrete Platform Section (Small)"),
+                    Tuple.Create("bkr_prop_biker_bblock_xl1", "Extra-Large Concrete Station Platform"),
+                    Tuple.Create("bkr_prop_biker_bblock_huge_01", "Mega Concrete Station Foundation Pad"),
+                    Tuple.Create("stt_prop_stunt_bblock_lrg2", "Large Smooth Concrete Platform Slab"),
+                    Tuple.Create("stt_prop_stunt_bblock_xl2", "Extra-Large Smooth Concrete Platform Slab")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "3. Full-Size Staircases & Ramps",
+                ZoneTag = "Stairs",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("hei_prop_carrier_stair_01a", "Full-Height Industrial Staircase w/ Rails"),
+                    Tuple.Create("prop_byard_steps_01", "Full-Piece Pedestrian Stairway w/ Rails"),
+                    Tuple.Create("prop_steps_big_01", "Wide Solid Concrete Station Steps"),
+                    Tuple.Create("bkr_prop_biker_bblock_hump_01", "Full-Width Concrete Walkable Ramp"),
+                    Tuple.Create("stt_prop_stunt_wideramp", "Wide Elevated Overbridge Access Ramp")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "4. Station Buildings, Gates & Turnstiles",
+                ZoneTag = "Entrance_Hall",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("prop_portacabin01", "Full-Size Modular Station Hall Building"),
+                    Tuple.Create("hei_prop_station_gate", "Official Rail / Subway Station Gate"),
+                    Tuple.Create("prop_turnstyle_01", "Commuter Single Turnstile Gate"),
+                    Tuple.Create("prop_turnstyle_bars", "Multi-Turnstile Array Barrier"),
+                    Tuple.Create("prop_tollbooth_1", "Station Ticket & Information Booth"),
+                    Tuple.Create("prop_vend_snak_01", "Automated Ticket / Snack Kiosk"),
+                    Tuple.Create("prop_vend_soda_01", "Refreshment Vending Kiosk"),
+                    Tuple.Create("prop_barier_conc_05a", "Wide Concrete Perimeter Wall")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "5. Simulated Market & Vendor Stalls",
+                ZoneTag = "Market",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("prop_gazebo_01", "Market Vendor Canopy Tent (White)"),
+                    Tuple.Create("prop_gazebo_02", "Market Vendor Canopy Tent (Blue)"),
+                    Tuple.Create("prop_parasol_01", "Outdoor Market Stall Umbrella"),
+                    Tuple.Create("prop_ven_market_table1", "Market Vendor Display Stall Table"),
+                    Tuple.Create("prop_table_03", "Market Folding Merchandise Table"),
+                    Tuple.Create("prop_crate_01a", "Market Goods Wooden Crate"),
+                    Tuple.Create("prop_boxpile_02b", "Stacked Market Cargo Boxes"),
+                    Tuple.Create("gr_prop_gr_bench_01a", "Modern Commuter Waiting Bench")
+                }
+            },
+            new BuilderCatalogCategory
+            {
+                Name = "6. Outside Road & Transit Plaza",
+                ZoneTag = "Road_Plaza",
+                Items = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("prop_busstop_02", "Glass Roadside Bus / Transit Shelter"),
+                    Tuple.Create("prop_busstop_04", "Covered Passenger Waiting Canopy"),
+                    Tuple.Create("prop_streetlight_01", "Tall Station Plaza Streetlight"),
+                    Tuple.Create("prop_mp_barrier_02b", "Roadway Lane Divider Barrier"),
+                    Tuple.Create("prop_traffic_01a", "Roadside Traffic Signal Pole"),
+                    Tuple.Create("prop_roadcone02a", "Traffic Channeling Cone")
+                }
+            }
+        };
+
+        private static bool IsPassThroughPropModel(string modelName)
+        {
+            if (string.IsNullOrEmpty(modelName)) return false;
+            string m = modelName.Trim().ToLowerInvariant();
+            return m == "prop_turnstyle_01" ||
+                   m == "prop_turnstyle_bars" ||
+                   m == "hei_prop_station_gate" ||
+                   m == "prop_fncsec_01gate" ||
+                   m == "prop_gazebo_01" ||
+                   m == "prop_gazebo_02" ||
+                   m == "prop_parasol_01" ||
+                   m == "prop_busstop_02" ||
+                   m == "prop_busstop_04" ||
+                   m == "prop_streetlight_01" ||
+                   m == "prop_traffic_01a" ||
+                   m == "prop_roadcone02a";
+        }
+
+        private static void GetModelSize(Model m, out float width, out float length, out float height)
+        {
+            width = 2.0f;
+            length = 2.0f;
+            height = 2.0f;
+            try
+            {
+                Vector3 minDim, maxDim;
+                m.GetDimensions(out minDim, out maxDim);
+                width = Math.Max(0.4f, (float)Math.Round(maxDim.X - minDim.X, 2));
+                length = Math.Max(0.4f, (float)Math.Round(maxDim.Y - minDim.Y, 2));
+                height = Math.Max(0.4f, (float)Math.Round(maxDim.Z - minDim.Z, 2));
+            }
+            catch { }
+        }
+
+        private void ApplyMenyooTextureVariation(Prop p, string modelName)
+        {
+            if (p == null || !p.Exists()) return;
+            try
+            {
+                // Native _SET_OBJECT_TEXTURE_VARIATION (0x971DA0055324D033): used by Menyoo Object Spooner
+                // to give stunt/biker building blocks clean concrete/asphalt/industrial textures
+                Function.Call((Hash)0x971DA0055324D033, p.Handle, _builderTextureVariation);
+            }
+            catch { }
+        }
+
+        private void ResolveBuilderPreviewModelAndRot(string catalogItemKey, out string realModelName, out Vector3 previewRot)
+        {
+            previewRot = new Vector3(_builderPitch, _builderRoll, _builderHeading);
+            realModelName = !string.IsNullOrEmpty(_sampledCustomModelName) ? _sampledCustomModelName : catalogItemKey;
+        }
+
+        private Prop CreateConfiguredStationProp(Model m, string modelName, Vector3 pos, Vector3 rotPitchRollYaw, string zoneTag)
+        {
+            Prop p = World.CreateProp(m, pos, rotPitchRollYaw, dynamic: false, placeOnGround: false);
+            if (p != null && p.Exists())
+            {
+                Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, p.Handle, pos.X, pos.Y, pos.Z, false, false, false);
+                p.Rotation = rotPitchRollYaw;
+                p.IsPositionFrozen = true;
+                Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED, p.Handle, false);
+
+                ApplyMenyooTextureVariation(p, modelName);
+
+                bool isRoofCanopy = !string.IsNullOrEmpty(zoneTag) &&
+                                    zoneTag.IndexOf("Roof", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (IsPassThroughPropModel(modelName) || isRoofCanopy)
+                {
+                    Function.Call(Hash.SET_ENTITY_COLLISION, p.Handle, false, false);
+                    p.IsCollisionEnabled = false;
+                }
+
+                float w, l, h;
+                GetModelSize(m, out w, out l, out h);
+
+                CustomPropData cpd = new CustomPropData
+                {
+                    Handle = p.Handle,
+                    Model = modelName,
+                    X = pos.X,
+                    Y = pos.Y,
+                    Z = pos.Z,
+                    Heading = rotPitchRollYaw.Z,
+                    Pitch = rotPitchRollYaw.X,
+                    Roll = rotPitchRollYaw.Y,
+                    Zone = string.IsNullOrEmpty(zoneTag) ? "Station" : zoneTag,
+                    Width = w,
+                    Length = l,
+                    Height = h
+                };
+
+                lock (_lock)
+                {
+                    _customProps[p.Handle] = cpd;
+                    if (!_stationPropHandles.Contains(p.Handle))
+                    {
+                        _stationPropHandles.Add(p.Handle);
+                    }
+                    _propUndoStack.Remove(p.Handle);
+                    _propUndoStack.Add(p.Handle);
+                }
+            }
+            return p;
+        }
+
+        private static Dictionary<int, string> _knownPropHashNames;
+        private static HashSet<int> _architecturePropHashes;
+
+        private static void EnsurePropHashTablesInitialized()
+        {
+            if (_knownPropHashNames != null && _architecturePropHashes != null) return;
+            var map = new Dictionary<int, string>();
+            var arch = new HashSet<int>();
+
+            string[] archModels = new string[]
+            {
+                "prop_walkway1", "prop_trainstation1", "prop_trainstation2", "prop_trainstation3", "prop_traincrossing1",
+                "prop_fib_wallfrag01", "prop_test_elevator", "prop_test_elevator_dr", "prop_rf_conc_pillar", "prop_fncres_03b",
+                "prop_temp_block_blocker", "port_xr_stairs_01", "prop_train_ticket_02", "prop_game_clock_02",
+                "hei_prop_station_gate", "prop_air_sechut_01",
+                "bkr_prop_biker_bblock_lrg1", "bkr_prop_biker_bblock_mdm1", "bkr_prop_biker_bblock_sml1",
+                "bkr_prop_biker_bblock_sml2", "bkr_prop_biker_bblock_xl1", "bkr_prop_biker_bblock_huge_01",
+                "bkr_prop_biker_bblock_hump_01", "stt_prop_stunt_bblock_lrg2", "stt_prop_stunt_bblock_mdm2",
+                "stt_prop_stunt_bblock_sml2", "stt_prop_stunt_bblock_xl2", "stt_prop_stunt_track_dwshort",
+                "stt_prop_stunt_track_straight", "stt_prop_stunt_wideramp", "prop_gate_bridge_ld",
+                "hei_prop_carrier_stair_01a", "prop_byard_steps_01", "prop_steps_big_01", "prop_portacabin01",
+                "prop_container_03a", "prop_barier_conc_05a", "prop_turnstyle_01", "prop_turnstyle_bars",
+                "prop_tollbooth_1"
+            };
+            for (int i = 0; i < archModels.Length; i++)
+            {
+                int h = Game.GenerateHash(archModels[i]);
+                map[h] = archModels[i];
+                arch.Add(h);
+            }
+
+            string[] extraModels = new string[]
+            {
+                "prop_vend_snak_01", "prop_vend_soda_01", "gr_prop_gr_bench_01a", "prop_streetlight_01",
+                "prop_gazebo_01", "prop_gazebo_02", "prop_parasol_01", "prop_ven_market_table1",
+                "prop_table_03", "prop_crate_01a", "prop_boxpile_02b", "prop_busstop_02", "prop_busstop_04",
+                "prop_mp_barrier_02b", "prop_traffic_01a", "prop_roadcone02a", "prop_bench_01a", "prop_bench_06",
+                "prop_bin_01a", "prop_bin_05a", "prop_sec_barier_04b", "prop_off_chair_05", "prop_table_03b_chr",
+                "prop_satdish_s_04a", "prop_Snow_Light_01", "prop_WarningLight_01", "prop_rub_binbag_sd_01"
+            };
+            for (int i = 0; i < extraModels.Length; i++)
+            {
+                int h = Game.GenerateHash(extraModels[i]);
+                map[h] = extraModels[i];
+            }
+
+            _knownPropHashNames = map;
+            _architecturePropHashes = arch;
+        }
+
+        private static string ResolvePropModelName(int modelHash)
+        {
+            EnsurePropHashTablesInitialized();
+            string name;
+            if (_knownPropHashNames.TryGetValue(modelHash, out name))
+            {
+                return name;
+            }
+            return "0x" + modelHash.ToString("X8");
+        }
+
+        private void SyncWorldPropsWithManager()
+        {
+            try
+            {
+                EnsurePropHashTablesInitialized();
+                Ped playerPed = Game.Player != null ? Game.Player.Character : null;
+                Vector3 refPos = (playerPed != null && playerPed.Exists())
+                    ? playerPed.Position
+                    : new Vector3(_experiment.CenterX, _experiment.CenterY, _experiment.CenterZ);
+
+                Prop[] allProps = World.GetAllProps();
+                if (allProps == null) return;
+
+                for (int i = 0; i < allProps.Length; i++)
+                {
+                    Prop p = allProps[i];
+                    if (p == null || !p.Exists()) continue;
+                    int h = p.Handle;
+                    if (h == _previewPropHandle) continue;
+
+                    lock (_lock)
+                    {
+                        if (_customProps.ContainsKey(h))
+                        {
+                            CustomPropData existing = _customProps[h];
+                            existing.X = p.Position.X;
+                            existing.Y = p.Position.Y;
+                            existing.Z = p.Position.Z;
+                            existing.Heading = p.Heading;
+                            existing.Pitch = p.Rotation.X;
+                            existing.Roll = p.Rotation.Y;
+                            continue;
+                        }
+                    }
+
+                    // Discover Menyoo-spawned props (mission entities) or custom station architecture props near player
+                    if ((p.Position - refPos).Length() > 500.0f) continue;
+                    if (Function.Call<bool>(Hash.IS_ENTITY_ATTACHED, h)) continue;
+
+                    int modelHash = p.Model.Hash;
+                    bool isMissionEnt = Function.Call<bool>(Hash.IS_ENTITY_A_MISSION_ENTITY, h);
+                    bool isArchProp = _architecturePropHashes.Contains(modelHash);
+
+                    if (isMissionEnt || isArchProp)
+                    {
+                        float pw, pl, ph;
+                        GetModelSize(p.Model, out pw, out pl, out ph);
+                        string resolvedModel = ResolvePropModelName(modelHash);
+
+                        CustomPropData cpd = new CustomPropData
+                        {
+                            Handle = h,
+                            Model = resolvedModel,
+                            X = p.Position.X,
+                            Y = p.Position.Y,
+                            Z = p.Position.Z,
+                            Heading = p.Heading,
+                            Pitch = p.Rotation.X,
+                            Roll = p.Rotation.Y,
+                            Zone = "Menyoo",
+                            Width = pw,
+                            Length = pl,
+                            Height = ph
+                        };
+
+                        lock (_lock)
+                        {
+                            _customProps[h] = cpd;
+                            if (!_stationPropHandles.Contains(h)) _stationPropHandles.Add(h);
+                            if (!_propUndoStack.Contains(h)) _propUndoStack.Add(h);
+                            _lastPlacedPropHandle = h;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private bool ForceDeletePropEntity(int handle)
+        {
+            if (handle == 0) return false;
+            bool deleted = false;
+            try
+            {
+                Entity ent = Entity.FromHandle(handle);
+                if (ent != null && ent.Exists())
+                {
+                    Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, ent.Handle, true, true);
+                    Function.Call(Hash.DETACH_ENTITY, ent.Handle, true, true);
+                    ent.IsPersistent = true;
+                    ent.Delete();
+                    if (ent.Exists())
+                    {
+                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, 0f, 0f, -1000f, false, false, false);
+                        Function.Call(Hash.SET_ENTITY_VISIBLE, ent.Handle, false, false);
+                        Function.Call(Hash.SET_ENTITY_COLLISION, ent.Handle, false, false);
+                        ent.MarkAsNoLongerNeeded();
+                    }
+                    deleted = true;
+                }
+            }
+            catch { }
+
+            lock (_lock)
+            {
+                if (_customProps.ContainsKey(handle))
+                {
+                    _customProps.Remove(handle);
+                    deleted = true;
+                }
+                _stationPropHandles.Remove(handle);
+                _propUndoStack.Remove(handle);
+                if (_lastPlacedPropHandle == handle)
+                {
+                    _lastPlacedPropHandle = _propUndoStack.Count > 0 ? _propUndoStack[_propUndoStack.Count - 1] : 0;
+                }
+            }
+            if (_selectedPropHandle == handle) _selectedPropHandle = 0;
+            if (_aimedPropHandle == handle) _aimedPropHandle = 0;
+            return deleted;
+        }
+
+        private bool UndoLastProp(out int undoneId, out string undoneModel)
+        {
+            undoneId = 0;
+            undoneModel = "";
+            SyncWorldPropsWithManager();
+
+            int candidateHandle = 0;
+            lock (_lock)
+            {
+                while (_propUndoStack.Count > 0)
+                {
+                    int top = _propUndoStack[_propUndoStack.Count - 1];
+                    _propUndoStack.RemoveAt(_propUndoStack.Count - 1);
+                    Entity e = Entity.FromHandle(top);
+                    if (e != null && e.Exists())
+                    {
+                        candidateHandle = top;
+                        if (_customProps.ContainsKey(top)) undoneModel = _customProps[top].Model;
+                        else undoneModel = ResolvePropModelName(e.Model.Hash);
+                        break;
+                    }
+                    else
+                    {
+                        _customProps.Remove(top);
+                        _stationPropHandles.Remove(top);
+                    }
+                }
+
+                if (candidateHandle == 0 && _customProps.Count > 0)
+                {
+                    int maxHandle = 0;
+                    foreach (var kvp in _customProps)
+                    {
+                        Entity e = Entity.FromHandle(kvp.Key);
+                        if (e != null && e.Exists() && kvp.Key > maxHandle)
+                        {
+                            maxHandle = kvp.Key;
+                            undoneModel = kvp.Value.Model;
+                        }
+                    }
+                    candidateHandle = maxHandle;
+                }
+            }
+
+            if (candidateHandle == 0)
+            {
+                GTA.UI.Screen.ShowSubtitle("~y~[Undo Prop] No placed props left to undo.~s~", 2000);
+                return false;
+            }
+
+            undoneId = candidateHandle;
+            ForceDeletePropEntity(candidateHandle);
+            GTA.UI.Screen.ShowSubtitle(string.Format("~o~[Undo Prop]~s~ Removed ~y~{0}~s~ [ID: {1}] ({2} left)", undoneModel, undoneId, _customProps.Count), 2200);
+            return true;
+        }
+
+        private bool DeleteNearestProp(float maxRadius, out int deletedId, out string deletedModel, out float distance)
+        {
+            deletedId = 0;
+            deletedModel = "";
+            distance = 0f;
+            SyncWorldPropsWithManager();
+
+            Ped playerPed = Game.Player != null ? Game.Player.Character : null;
+            if (playerPed == null || !playerPed.Exists()) return false;
+            Vector3 pPos = playerPed.Position;
+
+            int bestHandle = 0;
+            float bestDist = maxRadius;
+            string bestModel = "";
+
+            lock (_lock)
+            {
+                foreach (var kvp in _customProps)
+                {
+                    Entity e = Entity.FromHandle(kvp.Key);
+                    if (e != null && e.Exists())
+                    {
+                        float d = (e.Position - pPos).Length();
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestHandle = kvp.Key;
+                            bestModel = kvp.Value.Model;
+                        }
+                    }
+                }
+            }
+
+            if (bestHandle == 0)
+            {
+                return false;
+            }
+
+            deletedId = bestHandle;
+            deletedModel = bestModel;
+            distance = bestDist;
+            ForceDeletePropEntity(bestHandle);
+            GTA.UI.Screen.ShowSubtitle(string.Format("~r~[Deleted Nearest Prop]~s~ {0} [ID: {1}] ({2:F1}m away)", deletedModel, deletedId, distance), 2200);
+            return true;
+        }
+
+        private Dictionary<string, object> SerializeCustomProp(CustomPropData cpd)
+        {
+            return new Dictionary<string, object>
+            {
+                { "id", cpd.Handle },
+                { "model", cpd.Model },
+                { "x", Math.Round(cpd.X, 2) },
+                { "y", Math.Round(cpd.Y, 2) },
+                { "z", Math.Round(cpd.Z, 2) },
+                { "heading", Math.Round(cpd.Heading, 1) },
+                { "pitch", Math.Round(cpd.Pitch, 1) },
+                { "roll", Math.Round(cpd.Roll, 1) },
+                { "zone", cpd.Zone ?? "Station" },
+                { "width", Math.Round(cpd.Width > 0 ? cpd.Width : 2.0f, 2) },
+                { "length", Math.Round(cpd.Length > 0 ? cpd.Length : 2.0f, 2) },
+                { "height", Math.Round(cpd.Height > 0 ? cpd.Height : 2.0f, 2) }
+            };
+        }
+
+        private List<Dictionary<string, object>> GetSerializedCustomPropsList()
+        {
+            var propList = new List<Dictionary<string, object>>();
+            lock (_lock)
+            {
+                List<int> toRemove = new List<int>();
+                foreach (var kvp in _customProps)
+                {
+                    Entity ent = Entity.FromHandle(kvp.Key);
+                    if (ent != null && ent.Exists())
+                    {
+                        kvp.Value.X = ent.Position.X;
+                        kvp.Value.Y = ent.Position.Y;
+                        kvp.Value.Z = ent.Position.Z;
+                        kvp.Value.Heading = ent.Heading;
+                        propList.Add(SerializeCustomProp(kvp.Value));
+                    }
+                    else
+                    {
+                        toRemove.Add(kvp.Key);
+                    }
+                }
+                foreach (int remId in toRemove)
+                {
+                    _customProps.Remove(remId);
+                    _stationPropHandles.Remove(remId);
+                }
+            }
+            return propList;
+        }
+
+        private void SetPropBuilderMode(bool enabled)
+        {
+            _propBuilderEnabled = enabled;
+            if (_propBuilderEnabled)
+            {
+                if (!_noclipEnabled)
+                {
+                    SetNoclip(true);
+                }
+                _selectedPropHandle = 0;
+                GTA.UI.Screen.ShowSubtitle("~b~[3D Prop Studio ON]~s~ Arrows: Browse | Click/Enter: Place | Q/E: Rotate | C: Clone Edge | F10: Save", 4000);
+            }
+            else
+            {
+                DeletePreviewProp();
+                _selectedPropHandle = 0;
+                GTA.UI.Screen.ShowSubtitle("~y~[3D Prop Studio OFF]~s~", 2000);
+            }
+        }
+
+        private void DeletePreviewProp()
+        {
+            if (_previewPropHandle != 0)
+            {
+                try
+                {
+                    Entity prev = Entity.FromHandle(_previewPropHandle);
+                    if (prev != null && prev.Exists())
+                    {
+                        prev.Delete();
+                    }
+                }
+                catch { }
+                _previewPropHandle = 0;
+                _previewPropModel = "";
+            }
+        }
+
+        private CustomPropData ClonePropById(int sourceHandle, bool alongSideAxis, float directionSign)
+        {
+            CustomPropData src = null;
+            lock (_lock)
+            {
+                if (sourceHandle != 0 && _customProps.ContainsKey(sourceHandle))
+                {
+                    src = _customProps[sourceHandle];
+                }
+            }
+            if (src == null) return null;
+
+            Entity srcEnt = Entity.FromHandle(src.Handle);
+            if (srcEnt == null || !srcEnt.Exists()) return null;
+
+            Model m = new Model(src.Model);
+            if (!m.IsValid || (!m.IsLoaded && !m.Request(1000))) return null;
+
+            float w, l, h;
+            GetModelSize(m, out w, out l, out h);
+
+            // Offset along the prop's local X (width) or Y (length) axis for seamless edge-to-edge tiling
+            float stepDist = alongSideAxis ? l : w;
+            Vector3 localOffset = alongSideAxis
+                ? new Vector3(0f, stepDist * directionSign, 0f)
+                : new Vector3(stepDist * directionSign, 0f, 0f);
+
+            Vector3 newPos = srcEnt.GetOffsetPosition(localOffset);
+            Vector3 rot = new Vector3(src.Pitch, src.Roll, src.Heading);
+
+            Prop clonedProp = CreateConfiguredStationProp(m, src.Model, newPos, rot, src.Zone);
+            if (clonedProp != null && clonedProp.Exists())
+            {
+                _lastPlacedPropHandle = clonedProp.Handle;
+                if (_selectedPropHandle != 0) _selectedPropHandle = clonedProp.Handle;
+                GTA.UI.Screen.ShowSubtitle(string.Format("~g~Edge-Cloned {0}~s~ [ID: {1}]", src.Model, clonedProp.Handle), 1800);
+                return _customProps[clonedProp.Handle];
+            }
+            return null;
+        }
+
+        private int SaveStationLayoutDirect(string layoutName)
+        {
+            try
+            {
+                // 1. Sync any Menyoo-placed props in the world so everything currently placed is captured
+                SyncWorldPropsWithManager();
+
+                // 2. Lock and persist all captured entities in the GTA V world so they permanently stay in world
+                lock (_lock)
+                {
+                    foreach (var kvp in _customProps)
+                    {
+                        try
+                        {
+                            Entity ent = Entity.FromHandle(kvp.Key);
+                            if (ent != null && ent.Exists())
+                            {
+                                Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, ent.Handle, true, true);
+                                ent.IsPersistent = true;
+                                ent.IsPositionFrozen = true;
+                                Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED, ent.Handle, false);
+                                Function.Call(Hash.SET_ENTITY_INVINCIBLE, ent.Handle, true);
+                                Function.Call(Hash.SET_ENTITY_LOAD_COLLISION_FLAG, ent.Handle, true);
+                                kvp.Value.X = ent.Position.X;
+                                kvp.Value.Y = ent.Position.Y;
+                                kvp.Value.Z = ent.Position.Z;
+                                kvp.Value.Heading = ent.Heading;
+                                kvp.Value.Pitch = ent.Rotation.X;
+                                kvp.Value.Roll = ent.Rotation.Y;
+                                if (!_stationPropHandles.Contains(ent.Handle))
+                                {
+                                    _stationPropHandles.Add(ent.Handle);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                string layoutsDir = @"C:\Users\Teja-Clove\GTA_crowd\experiments\station_layouts";
+                if (!Directory.Exists(layoutsDir))
+                {
+                    Directory.CreateDirectory(layoutsDir);
+                }
+
+                var propsList = GetSerializedCustomPropsList();
+
+                // Compute centroid / anchor point so the whole assembly can also be spawned as a single composite entity
+                double sumX = 0, sumY = 0, minZ = double.MaxValue;
+                foreach (var p in propsList)
+                {
+                    double px = Convert.ToDouble(p["x"], CultureInfo.InvariantCulture);
+                    double py = Convert.ToDouble(p["y"], CultureInfo.InvariantCulture);
+                    double pz = Convert.ToDouble(p["z"], CultureInfo.InvariantCulture);
+                    sumX += px;
+                    sumY += py;
+                    if (pz < minZ) minZ = pz;
+                }
+                double centerX = propsList.Count > 0 ? Math.Round(sumX / propsList.Count, 2) : -1340.0;
+                double centerY = propsList.Count > 0 ? Math.Round(sumY / propsList.Count, 2) : -3040.0;
+                double baseZ = (propsList.Count > 0 && minZ < double.MaxValue) ? Math.Round(minZ, 2) : 13.95;
+
+                foreach (var p in propsList)
+                {
+                    p["dx"] = Math.Round(Convert.ToDouble(p["x"], CultureInfo.InvariantCulture) - centerX, 3);
+                    p["dy"] = Math.Round(Convert.ToDouble(p["y"], CultureInfo.InvariantCulture) - centerY, 3);
+                    p["dz"] = Math.Round(Convert.ToDouble(p["z"], CultureInfo.InvariantCulture) - baseZ, 3);
+                }
+
+                var rootObj = new Dictionary<string, object>
+                {
+                    { "name", layoutName },
+                    { "is_composite_entity", true },
+                    { "anchor", new Dictionary<string, object> { { "x", centerX }, { "y", centerY }, { "z", baseZ } } },
+                    { "saved_at_utc", DateTime.UtcNow.ToString("o") },
+                    { "props", propsList }
+                };
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = int.MaxValue;
+                string json = serializer.Serialize(rootObj);
+
+                string safeName = layoutName;
+                foreach (char c in Path.GetInvalidFileNameChars()) safeName = safeName.Replace(c, '_');
+
+                string filePath = Path.Combine(layoutsDir, safeName + ".json");
+                File.WriteAllText(filePath, json, Encoding.UTF8);
+
+                // Also keep Active_World_Props.json and NSRD_Station_Official.json updated
+                File.WriteAllText(Path.Combine(layoutsDir, "Active_World_Props.json"), json, Encoding.UTF8);
+                File.WriteAllText(Path.Combine(layoutsDir, "NSRD_Station_Official.json"), json, Encoding.UTF8);
+
+                // 3. Export Menyoo Spooner XML so the saved composite entity can also be loaded in Menyoo (F8 -> Object Spooner -> Manage Saved Files)
+                try
+                {
+                    StringBuilder sbXml = new StringBuilder();
+                    sbXml.AppendLine("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>");
+                    sbXml.AppendLine("<SpoonerPlacements>");
+                    sbXml.AppendLine("\t<Note>Saved Composite Station Entity from CrowdSim (" + safeName + ")</Note>");
+                    sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t<ReferenceCoords><X>{0:F4}</X><Y>{1:F4}</Y><Z>{2:F4}</Z></ReferenceCoords>", centerX, centerY, baseZ));
+                    int idx = 1;
+                    foreach (var p in propsList)
+                    {
+                        string mName = Convert.ToString(p["model"]);
+                        int mHash = Function.Call<int>(Hash.GET_HASH_KEY, mName);
+                        double px = Convert.ToDouble(p["x"], CultureInfo.InvariantCulture);
+                        double py = Convert.ToDouble(p["y"], CultureInfo.InvariantCulture);
+                        double pz = Convert.ToDouble(p["z"], CultureInfo.InvariantCulture);
+                        double pHead = Convert.ToDouble(p["heading"], CultureInfo.InvariantCulture);
+                        double pPitch = p.ContainsKey("pitch") ? Convert.ToDouble(p["pitch"], CultureInfo.InvariantCulture) : 0.0;
+                        double pRoll = p.ContainsKey("roll") ? Convert.ToDouble(p["roll"], CultureInfo.InvariantCulture) : 0.0;
+
+                        sbXml.AppendLine("\t<Placement>");
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t<ModelHash>0x{0:x8}</ModelHash>", mHash));
+                        sbXml.AppendLine("\t\t<Type>3</Type>");
+                        sbXml.AppendLine("\t\t<Dynamic>false</Dynamic>");
+                        sbXml.AppendLine("\t\t<FrozenPos>true</FrozenPos>");
+                        sbXml.AppendLine("\t\t<HashName>" + mName + "</HashName>");
+                        sbXml.AppendLine("\t\t<InitialHandle>" + idx + "</InitialHandle>");
+                        sbXml.AppendLine("\t\t<OpacityLevel>255</OpacityLevel>");
+                        sbXml.AppendLine("\t\t<LodDistance>1000</LodDistance>");
+                        sbXml.AppendLine("\t\t<IsVisible>true</IsVisible>");
+                        sbXml.AppendLine("\t\t<MaxHealth>1000</MaxHealth>");
+                        sbXml.AppendLine("\t\t<Health>1000</Health>");
+                        sbXml.AppendLine("\t\t<HasGravity>false</HasGravity>");
+                        sbXml.AppendLine("\t\t<IsOnFire>false</IsOnFire>");
+                        sbXml.AppendLine("\t\t<IsInvincible>true</IsInvincible>");
+                        sbXml.AppendLine("\t\t<IsBulletProof>true</IsBulletProof>");
+                        sbXml.AppendLine("\t\t<IsCollisionProof>false</IsCollisionProof>");
+                        sbXml.AppendLine("\t\t<IsExplosionProof>true</IsExplosionProof>");
+                        sbXml.AppendLine("\t\t<IsFireProof>true</IsFireProof>");
+                        sbXml.AppendLine("\t\t<IsMeleeProof>true</IsMeleeProof>");
+                        sbXml.AppendLine("\t\t<IsOnlyDamagedByPlayer>false</IsOnlyDamagedByPlayer>");
+                        sbXml.AppendLine("\t\t<PositionRotation>");
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<X>{0:F4}</X>", px));
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<Y>{0:F4}</Y>", py));
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<Z>{0:F4}</Z>", pz));
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<Pitch>{0:F4}</Pitch>", pPitch));
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<Roll>{0:F4}</Roll>", pRoll));
+                        sbXml.AppendLine(string.Format(CultureInfo.InvariantCulture, "\t\t\t<Yaw>{0:F4}</Yaw>", pHead));
+                        sbXml.AppendLine("\t\t</PositionRotation>");
+                        sbXml.AppendLine("\t\t<Attachment isAttached=\"false\" />");
+                        sbXml.AppendLine("\t</Placement>");
+                        idx++;
+                    }
+                    sbXml.AppendLine("</SpoonerPlacements>");
+                    string xmlContent = sbXml.ToString();
+                    File.WriteAllText(Path.Combine(layoutsDir, safeName + ".xml"), xmlContent, Encoding.UTF8);
+
+                    string menyooSpoonerDir = @"D:\Games\Grand Theft Auto V Legacy\menyooStuff\Spooner";
+                    if (Directory.Exists(menyooSpoonerDir))
+                    {
+                        File.WriteAllText(Path.Combine(menyooSpoonerDir, safeName + ".xml"), xmlContent, Encoding.UTF8);
+                    }
+                }
+                catch { }
+
+                GTA.UI.Screen.ShowSubtitle(string.Format("~g~[Saved & Locked in World]~s~ '{0}' ({1} props saved as Composite Entity)!", layoutName, propsList.Count), 3500);
+                Log(string.Format("INFO: Saved composite station entity '{0}' with {1} props to {2}", layoutName, propsList.Count, filePath));
+                return propsList.Count;
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR: SaveStationLayoutDirect failed: " + ex.Message);
+                GTA.UI.Screen.ShowSubtitle("~r~Save Layout Failed: " + ex.Message + "~s~", 3000);
+                return 0;
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        private static bool IsMenyooLoaded()
+        {
+            try
+            {
+                return GetModuleHandle("Menyoo.asi") != IntPtr.Zero;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void OnKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.F6)
+            {
+                SetNoclip(!_noclipEnabled);
+                GTA.UI.Screen.ShowSubtitle(_noclipEnabled ? "~g~Fly Mode ON~s~ [W/S/A/D: Move, Space: UP, Shift: DOWN, Tab: Fast]" : "~r~Fly Mode (Noclip) OFF~s~", 2500);
+            }
+            else if (e.KeyCode == Keys.F7)
+            {
+                _godModeEnabled = !_godModeEnabled;
+                GTA.UI.Screen.ShowSubtitle(_godModeEnabled ? "~g~God Mode: ON (Invincible)~s~" : "~y~God Mode: OFF~s~", 2500);
+            }
+            else if (e.KeyCode == Keys.F5)
+            {
+                _neverWantedEnabled = !_neverWantedEnabled;
+                if (_neverWantedEnabled && Game.Player != null)
+                {
+                    Game.Player.WantedLevel = 0;
+                    Function.Call(Hash.CLEAR_PLAYER_WANTED_LEVEL, Game.Player.Handle);
+                }
+                GTA.UI.Screen.ShowSubtitle(_neverWantedEnabled ? "~g~Never Wanted: ON (0 Stars Locked)~s~" : "~y~Never Wanted: OFF~s~", 2500);
+            }
+            else if (e.KeyCode == Keys.F8 || e.KeyCode == Keys.F9)
+            {
+                if (!IsMenyooLoaded())
+                {
+                    GTA.UI.Screen.ShowSubtitle("~r~Menyoo.asi is not loaded yet!~s~ ~y~Quit GTA V completely and relaunch the game ('Insert' cannot load .asi mods).~s~", 6000);
+                }
+            }
+            else if (e.KeyCode == Keys.F11)
+            {
+                SetPropBuilderMode(!_propBuilderEnabled);
+            }
+            else if (e.KeyCode == Keys.F10)
+            {
+                SaveStationLayoutDirect("NSRD_Station_Official");
+            }
+            else if (e.Control && e.KeyCode == Keys.Z)
+            {
+                int uId;
+                string uMod;
+                UndoLastProp(out uId, out uMod);
+            }
+            else if (_propBuilderEnabled)
+            {
+                HandlePropBuilderKeyDown(e);
+            }
+        }
+
+        private void HandlePropBuilderKeyDown(KeyEventArgs e)
+        {
+            try
+            {
+                BuilderCatalogCategory curCat = _builderCatalog[_builderCategoryIdx];
+
+                // Category Navigation: Left / Right or J / L or Numpad 4 / 6
+                if (e.KeyCode == Keys.Left || e.KeyCode == Keys.J || e.KeyCode == Keys.NumPad4)
+                {
+                    _sampledCustomModelName = null;
+                    _builderCategoryIdx = (_builderCategoryIdx - 1 + _builderCatalog.Count) % _builderCatalog.Count;
+                    _builderItemIdx = 0;
+                }
+                else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.L || e.KeyCode == Keys.NumPad6)
+                {
+                    _sampledCustomModelName = null;
+                    _builderCategoryIdx = (_builderCategoryIdx + 1) % _builderCatalog.Count;
+                    _builderItemIdx = 0;
+                }
+                // Item Navigation: Up / Down or I / K or Numpad 8 / 2
+                else if (e.KeyCode == Keys.Up || e.KeyCode == Keys.I || e.KeyCode == Keys.NumPad8)
+                {
+                    _sampledCustomModelName = null;
+                    _builderItemIdx = (_builderItemIdx - 1 + curCat.Items.Count) % curCat.Items.Count;
+                }
+                else if (e.KeyCode == Keys.Down || e.KeyCode == Keys.K || e.KeyCode == Keys.NumPad2)
+                {
+                    _sampledCustomModelName = null;
+                    _builderItemIdx = (_builderItemIdx + 1) % curCat.Items.Count;
+                }
+                // Cycle Menyoo Texture Variation (T)
+                else if (e.KeyCode == Keys.T)
+                {
+                    _builderTextureVariation = (_builderTextureVariation + 1) % 12;
+                    if (_previewPropHandle != 0)
+                    {
+                        Prop gp = Entity.FromHandle(_previewPropHandle) as Prop;
+                        ApplyMenyooTextureVariation(gp, _previewPropModel);
+                    }
+                    if (_selectedPropHandle != 0)
+                    {
+                        Prop sp = Entity.FromHandle(_selectedPropHandle) as Prop;
+                        ApplyMenyooTextureVariation(sp, "");
+                    }
+                    GTA.UI.Screen.ShowSubtitle(string.Format("~b~Menyoo Texture Variation [T]:~s~ #{0}", _builderTextureVariation), 1500);
+                }
+                // Sample / Eye-Dropper Any Aimed World Map Prop (M)
+                else if (e.KeyCode == Keys.M)
+                {
+                    Vector3 camPos = GameplayCamera.Position;
+                    Vector3 camDir = GameplayCamera.Direction;
+                    Entity ignoreEnt = (_previewPropHandle != 0) ? Entity.FromHandle(_previewPropHandle) : (Game.Player != null ? Game.Player.Character : null);
+                    RaycastResult ray = World.Raycast(camPos, camPos + camDir * 100.0f, IntersectFlags.Map | IntersectFlags.Objects, ignoreEnt);
+                    if (ray.DidHit && ray.HitEntity != null && ray.HitEntity.Exists())
+                    {
+                        int hash = ray.HitEntity.Model.Hash;
+                        _sampledCustomModelName = "0x" + hash.ToString("X8");
+                        DeletePreviewProp();
+                        float sw, sl, sh;
+                        GetModelSize(ray.HitEntity.Model, out sw, out sl, out sh);
+                        GTA.UI.Screen.ShowSubtitle(string.Format("~g~Sampled Map Object {0}~s~ (Size: {1:F1}x{2:F1}x{3:F1}m) - Click to Place!", _sampledCustomModelName, sw, sl, sh), 3000);
+                    }
+                    else
+                    {
+                        GTA.UI.Screen.ShowSubtitle("~y~Aim at any world building/bridge/stair object and press M to sample it!~s~", 2000);
+                    }
+                }
+                // Rotate Yaw (Q / E)
+                else if (e.KeyCode == Keys.Q)
+                {
+                    _builderHeading = (_builderHeading - _builderRotStep + 360.0f) % 360.0f;
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+                else if (e.KeyCode == Keys.E)
+                {
+                    _builderHeading = (_builderHeading + _builderRotStep) % 360.0f;
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+                // Cycle Rotation Step (R): 15 -> 45 -> 90 -> 5 -> 1
+                else if (e.KeyCode == Keys.R)
+                {
+                    if (_builderRotStep == 15.0f) _builderRotStep = 45.0f;
+                    else if (_builderRotStep == 45.0f) _builderRotStep = 90.0f;
+                    else if (_builderRotStep == 90.0f) _builderRotStep = 5.0f;
+                    else if (_builderRotStep == 5.0f) _builderRotStep = 1.0f;
+                    else _builderRotStep = 15.0f;
+                    GTA.UI.Screen.ShowSubtitle(string.Format("~b~Rotation Step:~s~ {0:F0} deg", _builderRotStep), 1200);
+                }
+                // Cycle Grid Snap (G): Off -> 0.25m -> 0.5m -> 1.0m
+                else if (e.KeyCode == Keys.G)
+                {
+                    if (_builderGridSnap == 0.0f) _builderGridSnap = 0.25f;
+                    else if (_builderGridSnap == 0.25f) _builderGridSnap = 0.5f;
+                    else if (_builderGridSnap == 0.5f) _builderGridSnap = 1.0f;
+                    else _builderGridSnap = 0.0f;
+                    GTA.UI.Screen.ShowSubtitle(_builderGridSnap > 0f ? string.Format("~b~XY Grid Snap:~s~ {0:F2}m", _builderGridSnap) : "~y~XY Grid Snap: OFF~s~", 1200);
+                }
+                // Elevation Z Offset (PageUp / PageDown or U / O)
+                else if (e.KeyCode == Keys.PageUp || e.KeyCode == Keys.U)
+                {
+                    float zStep = (_builderRotStep <= 5.0f) ? 0.05f : 0.25f;
+                    if (_selectedPropHandle != 0 && _customProps.ContainsKey(_selectedPropHandle))
+                    {
+                        _customProps[_selectedPropHandle].Z += zStep;
+                        ApplyTransformToSelectedPropIfEditing();
+                    }
+                    else
+                    {
+                        _builderManualZOffset += zStep;
+                    }
+                }
+                else if (e.KeyCode == Keys.PageDown || e.KeyCode == Keys.O)
+                {
+                    float zStep = (_builderRotStep <= 5.0f) ? 0.05f : 0.25f;
+                    if (_selectedPropHandle != 0 && _customProps.ContainsKey(_selectedPropHandle))
+                    {
+                        _customProps[_selectedPropHandle].Z -= zStep;
+                        ApplyTransformToSelectedPropIfEditing();
+                    }
+                    else
+                    {
+                        _builderManualZOffset -= zStep;
+                    }
+                }
+                // Pitch Tilt (Numpad 7 / Numpad 9)
+                else if (e.KeyCode == Keys.NumPad7)
+                {
+                    _builderPitch = Math.Max(-60.0f, _builderPitch - 5.0f);
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+                else if (e.KeyCode == Keys.NumPad9)
+                {
+                    _builderPitch = Math.Min(60.0f, _builderPitch + 5.0f);
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+                // Reset manual Z / Pitch / Roll offsets (H)
+                else if (e.KeyCode == Keys.H)
+                {
+                    _builderManualZOffset = 0.0f;
+                    _builderPitch = 0.0f;
+                    _builderRoll = 0.0f;
+                    ApplyTransformToSelectedPropIfEditing();
+                    GTA.UI.Screen.ShowSubtitle("~g~Reset Z Offset & Pitch/Roll to 0~s~", 1200);
+                }
+                // Toggle Clone Axis (V): Width (X) vs Length (Y)
+                else if (e.KeyCode == Keys.V)
+                {
+                    _builderCloneSideAxis = !_builderCloneSideAxis;
+                    GTA.UI.Screen.ShowSubtitle(_builderCloneSideAxis ? "~b~Clone Axis:~s~ Length (Y-Axis)" : "~b~Clone Axis:~s~ Width (X-Axis)", 1500);
+                }
+                // Edge-to-Edge Smart Clone (C)
+                else if (e.KeyCode == Keys.C)
+                {
+                    int targetId = _selectedPropHandle != 0 ? _selectedPropHandle : (_aimedPropHandle != 0 ? _aimedPropHandle : _lastPlacedPropHandle);
+                    ClonePropById(targetId, _builderCloneSideAxis, e.Shift ? -1.0f : 1.0f);
+                }
+                // Place Prop or Confirm Edit (Enter / NumPad5)
+                else if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.NumPad5)
+                {
+                    PlaceOrConfirmBuilderProp();
+                }
+                // Select / Grab Aimed Prop into Edit Mode (Back)
+                else if (e.KeyCode == Keys.Back)
+                {
+                    ToggleSelectAimedProp();
+                }
+                // Delete Aimed / Selected Prop (Delete / X)
+                else if (e.KeyCode == Keys.Delete || e.KeyCode == Keys.X)
+                {
+                    DeleteActiveOrAimedProp();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("WARN: HandlePropBuilderKeyDown error: " + ex.Message);
+            }
+        }
+
+        private void ApplyTransformToSelectedPropIfEditing()
+        {
+            if (_selectedPropHandle == 0) return;
+            lock (_lock)
+            {
+                if (_customProps.ContainsKey(_selectedPropHandle))
+                {
+                    CustomPropData cpd = _customProps[_selectedPropHandle];
+                    cpd.Heading = _builderHeading;
+                    cpd.Pitch = _builderPitch;
+                    cpd.Roll = _builderRoll;
+                    Entity ent = Entity.FromHandle(_selectedPropHandle);
+                    if (ent != null && ent.Exists())
+                    {
+                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, cpd.X, cpd.Y, cpd.Z, false, false, false);
+                        ent.Rotation = new Vector3(cpd.Pitch, cpd.Roll, cpd.Heading);
+                    }
+                }
+            }
+        }
+
+        private void PlaceOrConfirmBuilderProp()
+        {
+            if (_selectedPropHandle != 0)
+            {
+                GTA.UI.Screen.ShowSubtitle(string.Format("~g~Locked Prop [ID: {0}] in place!~s~", _selectedPropHandle), 1500);
+                _lastPlacedPropHandle = _selectedPropHandle;
+                _selectedPropHandle = 0;
+                return;
+            }
+
+            BuilderCatalogCategory cat = _builderCatalog[_builderCategoryIdx];
+            Tuple<string, string> item = cat.Items[_builderItemIdx];
+            string modelName = !string.IsNullOrEmpty(_sampledCustomModelName) ? _sampledCustomModelName : item.Item1;
+
+            if (modelName.StartsWith("prefab_", StringComparison.OrdinalIgnoreCase))
+            {
+                int built = SpawnConcretePrefab(modelName, _builderPreviewPos, _builderHeading, cat.ZoneTag);
+                if (built > 0)
+                {
+                    GTA.UI.Screen.ShowSubtitle(string.Format("~g~Built {0}~s~ ({1} full-size blocks)", item.Item2, built), 2500);
+                }
+                return;
+            }
+
+            Model m = ParseModelFromString(modelName);
+            if (!m.IsValid || (!m.IsLoaded && !m.Request(1000)))
+            {
+                GTA.UI.Screen.ShowSubtitle("~r~Failed loading model: " + modelName + "~s~", 2000);
+                return;
+            }
+
+            Vector3 rot = new Vector3(_builderPitch, _builderRoll, _builderHeading);
+            Prop created = CreateConfiguredStationProp(m, modelName, _builderPreviewPos, rot, cat.ZoneTag);
+            if (created != null && created.Exists())
+            {
+                _lastPlacedPropHandle = created.Handle;
+                GTA.UI.Screen.ShowSubtitle(string.Format("~g~Placed {0}~s~ ({1:F1}x{2:F1}x{3:F1}m) [Press ~b~C~s~ to Edge-Clone]", modelName, _previewModelDims.X, _previewModelDims.Y, _previewModelDims.Z), 2200);
+            }
+        }
+
+        private static Model ParseModelFromString(string modelNameOrHex)
+        {
+            if (string.IsNullOrEmpty(modelNameOrHex)) return new Model(0);
+            string s = modelNameOrHex.Trim();
+            if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                int parsedHash;
+                if (int.TryParse(s.Substring(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out parsedHash))
+                {
+                    return new Model(parsedHash);
+                }
+            }
+            return new Model(s);
+        }
+
+        private void ToggleSelectAimedProp()
+        {
+            if (_selectedPropHandle != 0)
+            {
+                GTA.UI.Screen.ShowSubtitle("~y~Released Selected Prop (Back to Spawn Mode)~s~", 1500);
+                _selectedPropHandle = 0;
+                return;
+            }
+
+            if (_aimedPropHandle != 0)
+            {
+                lock (_lock)
+                {
+                    if (_customProps.ContainsKey(_aimedPropHandle))
+                    {
+                        CustomPropData cpd = _customProps[_aimedPropHandle];
+                        _selectedPropHandle = _aimedPropHandle;
+                        _builderHeading = cpd.Heading;
+                        _builderPitch = cpd.Pitch;
+                        _builderRoll = cpd.Roll;
+                        DeletePreviewProp();
+                        GTA.UI.Screen.ShowSubtitle(string.Format("~b~Grabbed Prop {0} [#{1}]~s~ (Aim to Move, Q/E Rotate, Click/Enter Lock)", cpd.Model, cpd.Handle), 2500);
+                    }
+                }
+            }
+            else
+            {
+                GTA.UI.Screen.ShowSubtitle("~y~Aim crosshair at an existing prop to grab/select it!~s~", 1500);
+            }
+        }
+
+        private void DeleteActiveOrAimedProp()
+        {
+            int targetId = _selectedPropHandle != 0 ? _selectedPropHandle : (_aimedPropHandle != 0 ? _aimedPropHandle : _lastPlacedPropHandle);
+            if (targetId == 0) return;
+
+            Entity ent = Entity.FromHandle(targetId);
+            if (ent != null && ent.Exists())
+            {
+                ent.Delete();
+            }
+
+            string delModel = "Prop";
+            lock (_lock)
+            {
+                if (_customProps.ContainsKey(targetId))
+                {
+                    delModel = _customProps[targetId].Model;
+                    _customProps.Remove(targetId);
+                }
+                _stationPropHandles.Remove(targetId);
+            }
+
+            if (_selectedPropHandle == targetId) _selectedPropHandle = 0;
+            if (_aimedPropHandle == targetId) _aimedPropHandle = 0;
+            if (_lastPlacedPropHandle == targetId) _lastPlacedPropHandle = 0;
+
+            GTA.UI.Screen.ShowSubtitle(string.Format("~r~Deleted {0} [#{1}]~s~", delModel, targetId), 1500);
+        }
+
+        private void TickPropBuilder()
+        {
+            try
+            {
+                // Disable weapon wheel & attack/aim while in 3D Prop Builder so mouse clicks & scroll wheel control props
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Attack, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Aim, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.SelectWeapon, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.WeaponWheelNext, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.WeaponWheelPrev, true);
+
+                // Mouse Wheel Rotation
+                if (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)Control.WeaponWheelNext))
+                {
+                    _builderHeading = (_builderHeading + _builderRotStep) % 360.0f;
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+                else if (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)Control.WeaponWheelPrev))
+                {
+                    _builderHeading = (_builderHeading - _builderRotStep + 360.0f) % 360.0f;
+                    ApplyTransformToSelectedPropIfEditing();
+                }
+
+                // 1. Cast 3D Ray from GameplayCamera
+                Vector3 camPos = GameplayCamera.Position;
+                Vector3 camDir = GameplayCamera.Direction;
+                Entity ignoreEnt = (_previewPropHandle != 0) ? Entity.FromHandle(_previewPropHandle) : (Game.Player != null ? Game.Player.Character : null);
+
+                RaycastResult ray = World.Raycast(camPos, camPos + camDir * 75.0f, IntersectFlags.Map | IntersectFlags.Objects, ignoreEnt);
+                Vector3 hitPos = ray.DidHit ? ray.HitPosition : (camPos + camDir * 14.0f);
+
+                // Detect aimed custom prop (either direct raycast hit or closest custom prop to camera ray)
+                _aimedPropHandle = 0;
+                if (ray.DidHit && ray.HitEntity != null && ray.HitEntity.Exists())
+                {
+                    int hId = ray.HitEntity.Handle;
+                    lock (_lock)
+                    {
+                        if (_customProps.ContainsKey(hId))
+                        {
+                            _aimedPropHandle = hId;
+                        }
+                    }
+                }
+                if (_aimedPropHandle == 0)
+                {
+                    float bestDist = 1.6f;
+                    lock (_lock)
+                    {
+                        foreach (var kvp in _customProps)
+                        {
+                            Vector3 pCenter = new Vector3(kvp.Value.X, kvp.Value.Y, kvp.Value.Z + kvp.Value.Height * 0.4f);
+                            Vector3 toProp = pCenter - camPos;
+                            float proj = Vector3.Dot(toProp, camDir);
+                            if (proj > 1.0f && proj < 60.0f)
+                            {
+                                Vector3 closestPt = camPos + camDir * proj;
+                                float perpDist = (pCenter - closestPt).Length();
+                                if (perpDist < bestDist)
+                                {
+                                    bestDist = perpDist;
+                                    _aimedPropHandle = kvp.Key;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Apply Grid Snap & Manual Z Offset
+                float targetX = hitPos.X;
+                float targetY = hitPos.Y;
+                if (_builderGridSnap > 0.01f)
+                {
+                    targetX = (float)Math.Round(targetX / _builderGridSnap) * _builderGridSnap;
+                    targetY = (float)Math.Round(targetY / _builderGridSnap) * _builderGridSnap;
+                }
+                float surfaceZ = hitPos.Z;
+                float probedZ;
+                if (TryGetPreciseSurfaceZ(targetX, targetY, hitPos.Z + 2.5f, out probedZ))
+                {
+                    surfaceZ = probedZ;
+                }
+                float targetZ = surfaceZ + _builderManualZOffset;
+                _builderPreviewPos = new Vector3(targetX, targetY, targetZ);
+
+                // 2. Update either Selected Placed Prop OR Ghost Preview Prop
+                BuilderCatalogCategory curCat = _builderCatalog[_builderCategoryIdx];
+                Tuple<string, string> curItem = curCat.Items[_builderItemIdx];
+                string activeModelName = curItem.Item1;
+
+                if (_selectedPropHandle != 0)
+                {
+                    DeletePreviewProp();
+                    Entity selEnt = Entity.FromHandle(_selectedPropHandle);
+                    if (selEnt != null && selEnt.Exists())
+                    {
+                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, selEnt.Handle, _builderPreviewPos.X, _builderPreviewPos.Y, _builderPreviewPos.Z, false, false, false);
+                        selEnt.Rotation = new Vector3(_builderPitch, _builderRoll, _builderHeading);
+                        lock (_lock)
+                        {
+                            if (_customProps.ContainsKey(_selectedPropHandle))
+                            {
+                                _customProps[_selectedPropHandle].X = _builderPreviewPos.X;
+                                _customProps[_selectedPropHandle].Y = _builderPreviewPos.Y;
+                                _customProps[_selectedPropHandle].Z = _builderPreviewPos.Z;
+                                _customProps[_selectedPropHandle].Heading = _builderHeading;
+                                _customProps[_selectedPropHandle].Pitch = _builderPitch;
+                                _customProps[_selectedPropHandle].Roll = _builderRoll;
+                            }
+                        }
+                        DrawEntityBoundingBox(selEnt, 245, 158, 11, 230); // Gold/Amber wireframe for grabbed prop
+                    }
+                    else
+                    {
+                        _selectedPropHandle = 0;
+                    }
+                }
+                else
+                {
+                    string previewRealModel;
+                    Vector3 previewRot;
+                    ResolveBuilderPreviewModelAndRot(activeModelName, out previewRealModel, out previewRot);
+
+                    // Maintain Ghost Preview Prop
+                    if (_previewPropHandle == 0 || !string.Equals(_previewPropModel, previewRealModel, StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeletePreviewProp();
+                        Model m = ParseModelFromString(previewRealModel);
+                        if (m.IsValid && (m.IsLoaded || m.Request(250)))
+                        {
+                            float pw, pl, ph;
+                            GetModelSize(m, out pw, out pl, out ph);
+                            _previewModelDims = new Vector3(pw, pl, ph);
+
+                            Prop ghost = World.CreateProp(m, _builderPreviewPos, previewRot, dynamic: false, placeOnGround: false);
+                            if (ghost != null && ghost.Exists())
+                            {
+                                ghost.IsPositionFrozen = true;
+                                Function.Call(Hash.SET_ENTITY_COLLISION, ghost.Handle, false, false);
+                                ghost.IsCollisionEnabled = false;
+                                ApplyMenyooTextureVariation(ghost, previewRealModel);
+                                ghost.Opacity = 175;
+                                _previewPropHandle = ghost.Handle;
+                                _previewPropModel = previewRealModel;
+                            }
+                        }
+                    }
+
+                    if (_previewPropHandle != 0)
+                    {
+                        Entity ghostEnt = Entity.FromHandle(_previewPropHandle);
+                        if (ghostEnt != null && ghostEnt.Exists())
+                        {
+                            Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ghostEnt.Handle, _builderPreviewPos.X, _builderPreviewPos.Y, _builderPreviewPos.Z, false, false, false);
+                            ghostEnt.Rotation = previewRot;
+                            DrawEntityBoundingBox(ghostEnt, 56, 189, 248, 220); // Cyan wireframe for ghost preview
+                        }
+                        else
+                        {
+                            _previewPropHandle = 0;
+                        }
+                    }
+
+                    // Highlight Aimed Existing Prop in Green
+                    if (_aimedPropHandle != 0)
+                    {
+                        Entity aimedEnt = Entity.FromHandle(_aimedPropHandle);
+                        if (aimedEnt != null && aimedEnt.Exists())
+                        {
+                            DrawEntityBoundingBox(aimedEnt, 16, 185, 129, 220);
+                        }
+                    }
+                }
+
+                // 3. Mouse Click Actions (Left Click = Place/Lock, Right Click = Grab/Select Aimed Prop)
+                if (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)Control.Attack))
+                {
+                    PlaceOrConfirmBuilderProp();
+                }
+                else if (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, (int)Control.Aim))
+                {
+                    ToggleSelectAimedProp();
+                }
+
+                // 4. Draw Center Crosshair & Right-Side Mod Menu HUD
+                DrawPropBuilderHud(curCat, curItem);
+            }
+            catch (Exception ex)
+            {
+                Log("WARN: TickPropBuilder exception: " + ex.Message);
+            }
+        }
+
+        private void DrawEntityBoundingBox(Entity ent, int r, int g, int b, int a)
+        {
+            try
+            {
+                Vector3 min, max;
+                ent.Model.GetDimensions(out min, out max);
+
+                Vector3 b1 = ent.GetOffsetPosition(new Vector3(min.X, min.Y, min.Z));
+                Vector3 b2 = ent.GetOffsetPosition(new Vector3(max.X, min.Y, min.Z));
+                Vector3 b3 = ent.GetOffsetPosition(new Vector3(max.X, max.Y, min.Z));
+                Vector3 b4 = ent.GetOffsetPosition(new Vector3(min.X, max.Y, min.Z));
+
+                Vector3 t1 = ent.GetOffsetPosition(new Vector3(min.X, min.Y, max.Z));
+                Vector3 t2 = ent.GetOffsetPosition(new Vector3(max.X, min.Y, max.Z));
+                Vector3 t3 = ent.GetOffsetPosition(new Vector3(max.X, max.Y, max.Z));
+                Vector3 t4 = ent.GetOffsetPosition(new Vector3(min.X, max.Y, max.Z));
+
+                // Bottom rectangle
+                Function.Call(Hash.DRAW_LINE, b1.X, b1.Y, b1.Z, b2.X, b2.Y, b2.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b2.X, b2.Y, b2.Z, b3.X, b3.Y, b3.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b3.X, b3.Y, b3.Z, b4.X, b4.Y, b4.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b4.X, b4.Y, b4.Z, b1.X, b1.Y, b1.Z, r, g, b, a);
+
+                // Top rectangle
+                Function.Call(Hash.DRAW_LINE, t1.X, t1.Y, t1.Z, t2.X, t2.Y, t2.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, t2.X, t2.Y, t2.Z, t3.X, t3.Y, t3.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, t3.X, t3.Y, t3.Z, t4.X, t4.Y, t4.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, t4.X, t4.Y, t4.Z, t1.X, t1.Y, t1.Z, r, g, b, a);
+
+                // Vertical pillars
+                Function.Call(Hash.DRAW_LINE, b1.X, b1.Y, b1.Z, t1.X, t1.Y, t1.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b2.X, b2.Y, b2.Z, t2.X, t2.Y, t2.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b3.X, b3.Y, b3.Z, t3.X, t3.Y, t3.Z, r, g, b, a);
+                Function.Call(Hash.DRAW_LINE, b4.X, b4.Y, b4.Z, t4.X, t4.Y, t4.Z, r, g, b, a);
+
+                // Heading arrow from center
+                Vector3 center = ent.Position;
+                Vector3 fwdTip = ent.GetOffsetPosition(new Vector3(0f, max.Y + 1.2f, 0.2f));
+                Function.Call(Hash.DRAW_LINE, center.X, center.Y, center.Z + 0.2f, fwdTip.X, fwdTip.Y, fwdTip.Z, 255, 215, 0, 255);
+            }
+            catch { }
+        }
+
+        private void DrawHudText(string text, float x, float y, float scale, int r, int g, int b, int a, bool centered = false)
+        {
+            Function.Call(Hash.SET_TEXT_FONT, 0);
+            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, a);
+            Function.Call(Hash.SET_TEXT_CENTRE, centered);
+            Function.Call(Hash.SET_TEXT_OUTLINE);
+            Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
+            Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
+            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, x, y);
+        }
+
+        private void DrawPropBuilderHud(BuilderCatalogCategory curCat, Tuple<string, string> curItem)
+        {
+            // Center Aim Crosshair
+            Function.Call(Hash.DRAW_RECT, 0.5f, 0.5f, 0.008f, 0.0015f, 56, 189, 248, 220);
+            Function.Call(Hash.DRAW_RECT, 0.5f, 0.5f, 0.001f, 0.012f, 56, 189, 248, 220);
+
+            // Right-side Mod Menu Background Panel
+            float panelX = 0.855f;
+            float panelW = 0.26f;
+            Function.Call(Hash.DRAW_RECT, panelX, 0.065f, panelW, 0.042f, 15, 118, 110, 240); // Teal Header
+            DrawHudText("CROWDSIM 3D PROP STUDIO (F9)", panelX, 0.050f, 0.34f, 255, 255, 255, 255, true);
+
+            // Category Bar
+            Function.Call(Hash.DRAW_RECT, panelX, 0.102f, panelW, 0.032f, 30, 41, 59, 235);
+            DrawHudText("< " + curCat.Name + " >", panelX, 0.090f, 0.28f, 56, 189, 248, 255, true);
+
+            // Catalog Items List
+            int itemCount = curCat.Items.Count;
+            float startY = 0.132f;
+            float rowH = 0.028f;
+            for (int i = 0; i < itemCount; i++)
+            {
+                float ry = startY + i * rowH;
+                bool isSel = (i == _builderItemIdx);
+                if (isSel)
+                {
+                    Function.Call(Hash.DRAW_RECT, panelX, ry, panelW, rowH, 2, 132, 199, 230);
+                    DrawHudText("> " + curCat.Items[i].Item2, panelX - panelW * 0.47f, ry - 0.011f, 0.25f, 255, 255, 255, 255, false);
+                }
+                else
+                {
+                    Function.Call(Hash.DRAW_RECT, panelX, ry, panelW, rowH, 15, 23, 42, 205);
+                    DrawHudText("  " + curCat.Items[i].Item2, panelX - panelW * 0.47f, ry - 0.011f, 0.24f, 203, 213, 225, 240, false);
+                }
+            }
+
+            // Telemetry & Controls Footer Box
+            float footY = startY + itemCount * rowH + 0.095f;
+            Function.Call(Hash.DRAW_RECT, panelX, footY, panelW, 0.19f, 9, 14, 23, 230);
+
+            string shownModel = !string.IsNullOrEmpty(_sampledCustomModelName) ? _sampledCustomModelName : curItem.Item1;
+            string modeStr = (_selectedPropHandle != 0)
+                ? string.Format("EDITING #{0} | Size: {1:F1}x{2:F1}x{3:F1}m", _selectedPropHandle, _previewModelDims.X, _previewModelDims.Y, _previewModelDims.Z)
+                : string.Format("{0} ({1:F1}x{2:F1}x{3:F1}m)", shownModel, _previewModelDims.X, _previewModelDims.Y, _previewModelDims.Z);
+
+            float tx = panelX - panelW * 0.47f;
+            float ty = footY - 0.088f;
+            DrawHudText(modeStr, tx, ty, 0.24f, 45, 212, 191, 255, false);
+            DrawHudText(string.Format("XYZ: ({0:F1}, {1:F1}, {2:F2}) | Z-Off: {3:+0.00;-0.00;0.00}m", _builderPreviewPos.X, _builderPreviewPos.Y, _builderPreviewPos.Z, _builderManualZOffset), tx, ty + 0.022f, 0.23f, 241, 245, 249, 255, false);
+            DrawHudText(string.Format("Yaw: {0:F0} (Step[R]:{1:F0}) | TexVar[T]: #{2} | Placed:{3}", _builderHeading, _builderRotStep, _builderTextureVariation, _customProps.Count), tx, ty + 0.044f, 0.23f, 241, 245, 249, 255, false);
+            DrawHudText(string.Format("Grid [G]: {0} | Clone Axis [V]: {1}", _builderGridSnap > 0 ? _builderGridSnap.ToString("F2") + "m" : "OFF", _builderCloneSideAxis ? "Length (Y)" : "Width (X)"), tx, ty + 0.066f, 0.23f, 251, 191, 36, 255, false);
+            DrawHudText("[L-Click/Enter] Place  [R-Click/Bksp] Grab", tx, ty + 0.092f, 0.22f, 148, 163, 184, 255, false);
+            DrawHudText("[Q/E/Wheel] Rotate  [PgUp/PgDn] Height Z", tx, ty + 0.112f, 0.22f, 148, 163, 184, 255, false);
+            DrawHudText("[C] Edge-Clone [T] Texture [M] Sample Map [F10] Save", tx, ty + 0.132f, 0.21f, 148, 163, 184, 255, false);
+        }
+
+        private void SetNoclip(bool enabled)
+        {
+            _noclipEnabled = enabled;
+            try
+            {
+                Ped p = Game.Player.Character;
+                if (p != null && p.Exists())
+                {
+                    Entity ent = (p.IsInVehicle() && p.CurrentVehicle != null) ? (Entity)p.CurrentVehicle : (Entity)p;
+                    ent.Velocity = Vector3.Zero;
+                    Function.Call(Hash.SET_ENTITY_VELOCITY, ent.Handle, 0f, 0f, 0f);
+
+                    if (_noclipEnabled)
+                    {
+                        // Enable NoClip: Freeze physics so no gravity or sinking, disable collision
+                        Function.Call(Hash.SET_ENTITY_COLLISION, ent.Handle, false, false);
+                        ent.IsCollisionEnabled = false;
+                        Function.Call(Hash.FREEZE_ENTITY_POSITION, ent.Handle, true);
+                        Function.Call(Hash.SET_PED_GRAVITY, p.Handle, false);
+                        // Lift slightly off the floor on activation
+                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, ent.Position.X, ent.Position.Y, ent.Position.Z + 0.35f, true, true, true);
+                    }
+                    else
+                    {
+                        // Disable NoClip: Unfreeze, restore collision and normal gravity
+                        Function.Call(Hash.FREEZE_ENTITY_POSITION, ent.Handle, false);
+                        Function.Call(Hash.SET_ENTITY_COLLISION, ent.Handle, true, true);
+                        ent.IsCollisionEnabled = true;
+                        Function.Call(Hash.SET_PED_GRAVITY, p.Handle, true);
+
+                        float gz;
+                        if (TryGetPreciseSurfaceZ(ent.Position.X, ent.Position.Y, ent.Position.Z, out gz))
+                        {
+                            Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, ent.Position.X, ent.Position.Y, gz + 0.15f, true, true, true);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        private void HandleNoclip(Ped playerPed)
+        {
+            try
+            {
+                Entity ent = (playerPed.IsInVehicle() && playerPed.CurrentVehicle != null)
+                    ? (Entity)playerPed.CurrentVehicle
+                    : (Entity)playerPed;
+
+                // 1. Keep entity frozen in physics so gravity and ragdoll NEVER pull or sink the player
+                Function.Call(Hash.FREEZE_ENTITY_POSITION, ent.Handle, true);
+                Function.Call(Hash.SET_ENTITY_COLLISION, ent.Handle, false, false);
+                Function.Call(Hash.SET_PED_GRAVITY, playerPed.Handle, false);
+                Function.Call(Hash.SET_ENTITY_VELOCITY, ent.Handle, 0f, 0f, 0f);
+                ent.Velocity = Vector3.Zero;
+
+                // 2. Disable default on-foot movement controls so Franklin does NOT walk or sink
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveUpDown, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveLeftRight, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveUpOnly, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveDownOnly, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveLeftOnly, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.MoveRightOnly, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Jump, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Sprint, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Duck, true);
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Attack, true);
+
+                // 3. Calculate horizontal heading vectors from camera
+                Vector3 camRot = GameplayCamera.Rotation;
+                float yawRad = (float)(camRot.Z * Math.PI / 180.0);
+                Vector3 forward2D = new Vector3(-(float)Math.Sin(yawRad), (float)Math.Cos(yawRad), 0f);
+                Vector3 right2D = new Vector3((float)Math.Cos(yawRad), (float)Math.Sin(yawRad), 0f);
+
+                // 4. Input detection: Check both GTA disabled controls and Windows hardware keyboard state
+                bool isSpace = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.Jump)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.Jump)
+                    || ((GetAsyncKeyState(0x20) & 0x8000) != 0);
+
+                bool isShift = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.Sprint)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.Sprint)
+                    || ((GetAsyncKeyState(0x10) & 0x8000) != 0)
+                    || ((GetAsyncKeyState(0xA0) & 0x8000) != 0);
+
+                bool isCtrl = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.Duck)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.Duck)
+                    || ((GetAsyncKeyState(0x11) & 0x8000) != 0)
+                    || ((GetAsyncKeyState(0xA2) & 0x8000) != 0);
+
+                bool isW = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.MoveUpOnly)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.MoveUpOnly)
+                    || ((GetAsyncKeyState(0x57) & 0x8000) != 0);
+
+                bool isS = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.MoveDownOnly)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.MoveDownOnly)
+                    || ((GetAsyncKeyState(0x53) & 0x8000) != 0);
+
+                bool isA = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.MoveLeftOnly)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.MoveLeftOnly)
+                    || ((GetAsyncKeyState(0x41) & 0x8000) != 0);
+
+                bool isD = Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, (int)Control.MoveRightOnly)
+                    || Function.Call<bool>(Hash.IS_CONTROL_PRESSED, 0, (int)Control.MoveRightOnly)
+                    || ((GetAsyncKeyState(0x44) & 0x8000) != 0);
+
+                // Speed modifiers (Note: when Prop Builder is open, E is reserved for prop rotation)
+                float speed = 0.9f;
+                bool isFast = ((GetAsyncKeyState(0x09) & 0x8000) != 0) // Tab
+                    || (!_propBuilderEnabled && ((GetAsyncKeyState(0x45) & 0x8000) != 0));
+                bool isSlow = ((GetAsyncKeyState(0x12) & 0x8000) != 0); // Alt
+
+                if (isFast) speed = 2.6f;
+                else if (isSlow) speed = 0.2f;
+
+                Vector3 newPos = ent.Position;
+
+                // Horizontal translation
+                if (isW) newPos += forward2D * speed;
+                if (isS) newPos -= forward2D * speed;
+                if (isD) newPos += right2D * speed;
+                if (isA) newPos -= right2D * speed;
+
+                // SPACE FOR UP
+                if (isSpace) newPos += Vector3.WorldUp * speed;
+
+                // SHIFT FOR DOWNWARDS (Ctrl also descends)
+                if (isShift || isCtrl) newPos -= Vector3.WorldUp * speed;
+
+                // 5. Instantly update coordinates without offset or ground collision drag
+                Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, ent.Handle, newPos.X, newPos.Y, newPos.Z, true, true, true);
+                ent.Heading = camRot.Z;
+            }
+            catch { }
+        }
+
+        private void VerifyFullSizeStationModels()
+        {
+            try
+            {
+                string[] testModels = new string[]
+                {
+                    "bkr_prop_biker_bblock_sml1", "bkr_prop_biker_bblock_sml2", "bkr_prop_biker_bblock_mdm1",
+                    "bkr_prop_biker_bblock_lrg1", "bkr_prop_biker_bblock_xl1", "bkr_prop_biker_bblock_huge_01",
+                    "bkr_prop_biker_bblock_hump_01", "stt_prop_stunt_bblock_sml2", "stt_prop_stunt_bblock_mdm2",
+                    "stt_prop_stunt_bblock_lrg2", "stt_prop_stunt_bblock_xl2", "stt_prop_stunt_track_dwshort",
+                    "stt_prop_stunt_track_straight", "stt_prop_stunt_wideramp", "prop_gate_bridge_ld",
+                    "hei_prop_carrier_stair_01a", "prop_byard_steps_01", "prop_steps_big_01",
+                    "prop_portacabin01", "prop_container_03a", "prop_barier_conc_05a",
+                    "hei_prop_station_gate", "prop_turnstyle_01", "prop_turnstyle_bars"
+                };
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < testModels.Length; i++)
+                {
+                    string mName = testModels[i];
+                    Model m = new Model(mName);
+                    bool valid = m.IsValid;
+                    bool loaded = valid && (m.IsLoaded || m.Request(350));
+                    float w = 0f, l = 0f, h = 0f;
+                    if (loaded) GetModelSize(m, out w, out l, out h);
+                    sb.AppendLine(string.Format("{0}: Valid={1}, Loaded={2}, Size=({3:F2}m x {4:F2}m x {5:F2}m)", mName, valid, loaded, w, l, h));
+                }
+                File.WriteAllText(@"C:\Users\Teja-Clove\GTA_crowd\logs\model_verify.log", sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private void PurgeAirportPropsInWorld()
+        {
+            try
+            {
+                int purged = 0;
+                int[] bannedHashes = new int[]
+                {
+                    Game.GenerateHash("prop_air_bridge01"),
+                    Game.GenerateHash("prop_air_bridge02"),
+                    Game.GenerateHash("prop_air_stair_01"),
+                    Game.GenerateHash("prop_air_stair_02"),
+                    Game.GenerateHash("prop_barier_conc_01a"),
+                    Game.GenerateHash("prop_barier_conc_02a"),
+                    Game.GenerateHash("prop_barier_conc_03a"),
+                    Game.GenerateHash("prop_gate_bridge_ld"),
+                    Game.GenerateHash("prop_byard_steps_01"),
+                    Game.GenerateHash("prop_steps_big_01"),
+                    Game.GenerateHash("prop_fnclink_03e")
+                };
+
+                Vector3 lsiaCenter = new Vector3(-1340.0f, -3040.0f, 13.95f);
+                Prop[] allProps = World.GetAllProps();
+                if (allProps != null)
+                {
+                    for (int i = 0; i < allProps.Length; i++)
+                    {
+                        Prop p = allProps[i];
+                        if (p != null && p.Exists())
+                        {
+                            if ((p.Position - lsiaCenter).Length() > 1000.0f) continue;
+                            int h = p.Model.Hash;
+                            for (int b = 0; b < bannedHashes.Length; b++)
+                            {
+                                if (h == bannedHashes[b])
+                                {
+                                    int pHandle = p.Handle;
+                                    p.Delete();
+                                    lock (_lock)
+                                    {
+                                        _customProps.Remove(pHandle);
+                                        _stationPropHandles.Remove(pHandle);
+                                    }
+                                    purged++;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (purged > 0)
+                {
+                    Log(string.Format("INFO: Purged {0} old airport / small barrier props from LSIA.", purged));
+                }
+                VerifyFullSizeStationModels();
+            }
+            catch (Exception ex)
+            {
+                Log("WARN: PurgeAirportPropsInWorld error: " + ex.Message);
+            }
+        }
+
+        private void ClearStationProps()
+        {
+            SyncWorldPropsWithManager();
+            DeletePreviewProp();
+            _selectedPropHandle = 0;
+            _aimedPropHandle = 0;
+            _lastPlacedPropHandle = 0;
+            List<int> allHandles;
+            lock (_lock)
+            {
+                allHandles = new List<int>(_stationPropHandles);
+                foreach (int k in _customProps.Keys)
+                {
+                    if (!allHandles.Contains(k)) allHandles.Add(k);
+                }
+            }
+            for (int i = 0; i < allHandles.Count; i++)
+            {
+                ForceDeletePropEntity(allHandles[i]);
+            }
+            lock (_lock)
+            {
+                _stationPropHandles.Clear();
+                _customProps.Clear();
+                _propUndoStack.Clear();
+            }
+            PurgeAirportPropsInWorld();
+            Log("INFO: Cleared all custom station props.");
+        }
+
+        private Prop SpawnSingleConcreteProp(string modelName, Vector3 pos, Vector3 rotPitchRollYaw, string zoneTag, ref int counter)
+        {
+            try
+            {
+                Model m = ParseModelFromString(modelName);
+                if (m.IsValid && (m.IsLoaded || m.Request(600)))
+                {
+                    Prop p = CreateConfiguredStationProp(m, modelName, pos, rotPitchRollYaw, zoneTag);
+                    if (p != null && p.Exists())
+                    {
+                        _lastPlacedPropHandle = p.Handle;
+                        counter++;
+                        return p;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private int SpawnConcretePrefab(string prefabName, Vector3 origin, float heading, string zoneTag)
+        {
+            int count = 0;
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_mdm1", origin, new Vector3(0f, 0f, heading), zoneTag, ref count);
+            return count;
+        }
+
+        private int BuildCustomStation(float bx, float by, float bz)
+        {
+            ClearStationProps();
+            int spawnedCount = 0;
+
+            string[] preloadModels = new string[]
+            {
+                "bkr_prop_biker_bblock_lrg1", "bkr_prop_biker_bblock_mdm1", "bkr_prop_biker_bblock_sml1",
+                "bkr_prop_biker_bblock_sml2", "stt_prop_stunt_track_dwshort", "prop_gate_bridge_ld",
+                "hei_prop_carrier_stair_01a", "prop_byard_steps_01", "prop_steps_big_01",
+                "prop_portacabin01", "prop_barier_conc_05a", "hei_prop_station_gate",
+                "prop_turnstyle_01", "prop_turnstyle_bars", "prop_tollbooth_1",
+                "prop_vend_snak_01", "prop_vend_soda_01", "gr_prop_gr_bench_01a",
+                "prop_streetlight_01", "prop_gazebo_01", "prop_gazebo_02",
+                "prop_parasol_01", "prop_ven_market_table1", "prop_table_03",
+                "prop_crate_01a", "prop_boxpile_02b", "prop_busstop_02",
+                "prop_busstop_04", "prop_mp_barrier_02b"
+            };
+            for (int mIdx = 0; mIdx < preloadModels.Length; mIdx++)
+            {
+                try
+                {
+                    Model m = new Model(preloadModels[mIdx]);
+                    if (m.IsValid) m.Request(800);
+                }
+                catch { }
+            }
+
+            // =========================================================================================
+            // FULL-SIZE SINGLE-PIECE MENYOO STATION & OUTSIDE MARKET COMPLEX
+            // Uses massive single-piece concrete platforms (bkr_prop_biker_bblock_lrg1/mdm1/sml1),
+            // full-size overpass bridges (prop_gate_bridge_ld / stt_prop_stunt_track_dwshort),
+            // and full-height staircases (hei_prop_carrier_stair_01a / prop_byard_steps_01 / prop_steps_big_01)
+            // =========================================================================================
+
+            // --- ZONE 1A: PLATFORM 2 (North Full-Size Concrete Platform: y = by + 9.0f) ---
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_lrg1", new Vector3(bx - 10.0f, by + 9.0f, bz - 0.35f), new Vector3(0f, 0f, 0f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_lrg1", new Vector3(bx + 12.0f, by + 9.0f, bz - 0.35f), new Vector3(0f, 0f, 0f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gazebo_02", new Vector3(bx - 12.0f, by + 9.5f, bz), new Vector3(0f, 0f, 0f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gazebo_02", new Vector3(bx + 13.0f, by + 9.5f, bz), new Vector3(0f, 0f, 0f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx - 14.0f, by + 10.8f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx - 9.0f, by + 10.8f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx + 11.0f, by + 10.8f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx + 16.0f, by + 10.8f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_streetlight_01", new Vector3(bx - 17.0f, by + 12.0f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_streetlight_01", new Vector3(bx + 18.0f, by + 12.0f, bz), new Vector3(0f, 0f, 180f), "Platform_2", ref spawnedCount);
+
+            // --- ZONE 1B: PLATFORM 1 (South Full-Size Concrete Platform: y = by - 9.0f) ---
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_lrg1", new Vector3(bx - 10.0f, by - 9.0f, bz - 0.35f), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_lrg1", new Vector3(bx + 12.0f, by - 9.0f, bz - 0.35f), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gazebo_02", new Vector3(bx - 12.0f, by - 8.5f, bz), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx - 14.0f, by - 10.0f, bz), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx - 9.0f, by - 10.0f, bz), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_streetlight_01", new Vector3(bx - 17.0f, by - 11.2f, bz), new Vector3(0f, 0f, 0f), "Platform_1", ref spawnedCount);
+
+            // --- ZONE 2: FULL-SIZE FOOT OVER BRIDGE (FOB) & FULL-HEIGHT STAIRCASES (x = bx + 4.0f) ---
+            float bridgeZ = bz + 3.6f;
+            SpawnSingleConcreteProp("prop_gate_bridge_ld", new Vector3(bx + 4.0f, by + 1.5f, bridgeZ), new Vector3(0f, 0f, 0f), "FOB_Bridge", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gate_bridge_ld", new Vector3(bx + 4.0f, by - 2.5f, bridgeZ), new Vector3(0f, 0f, 0f), "FOB_Bridge", ref spawnedCount);
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_sml2", new Vector3(bx + 4.0f, by, bridgeZ - 0.25f), new Vector3(0f, 0f, 90f), "FOB_Bridge", ref spawnedCount);
+
+            // Full-Height North Staircase (Platform 2 -> FOB Deck)
+            SpawnSingleConcreteProp("hei_prop_carrier_stair_01a", new Vector3(bx + 4.0f, by + 6.0f, bz), new Vector3(0f, 0f, 180f), "Stairs", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_byard_steps_01", new Vector3(bx + 4.0f, by + 5.5f, bz), new Vector3(0f, 0f, 0f), "Stairs", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_steps_big_01", new Vector3(bx + 4.0f, by + 7.5f, bz), new Vector3(0f, 0f, 0f), "Stairs", ref spawnedCount);
+
+            // Full-Height South Staircase (FOB Deck -> Platform 1 / Concourse Hall)
+            SpawnSingleConcreteProp("hei_prop_carrier_stair_01a", new Vector3(bx + 4.0f, by - 6.0f, bz), new Vector3(0f, 0f, 0f), "Stairs", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_byard_steps_01", new Vector3(bx + 4.0f, by - 5.5f, bz), new Vector3(0f, 0f, 180f), "Stairs", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_steps_big_01", new Vector3(bx + 4.0f, by - 7.5f, bz), new Vector3(0f, 0f, 180f), "Stairs", ref spawnedCount);
+
+            // --- ZONE 3: MAIN ENTRANCE / EXIT CONCOURSE HALL & TURNSTILES (y = by - 12 .. by - 18) ---
+            SpawnSingleConcreteProp("bkr_prop_biker_bblock_mdm1", new Vector3(bx + 11.0f, by - 15.0f, bz - 0.35f), new Vector3(0f, 0f, 0f), "Entrance_Hall", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_portacabin01", new Vector3(bx + 20.5f, by - 14.5f, bz), new Vector3(0f, 0f, 90f), "Entrance_Hall", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_tollbooth_1", new Vector3(bx + 17.5f, by - 14.2f, bz), new Vector3(0f, 0f, 270f), "Entrance_Hall", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_vend_snak_01", new Vector3(bx + 2.8f, by - 14.2f, bz), new Vector3(0f, 0f, 90f), "Entrance_Hall", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_vend_soda_01", new Vector3(bx + 2.8f, by - 15.8f, bz), new Vector3(0f, 0f, 90f), "Entrance_Hall", ref spawnedCount);
+
+            // Turnstile Gate Line (y = by - 18.0f opening South into Outside Market)
+            SpawnSingleConcreteProp("prop_barier_conc_05a", new Vector3(bx + 3.5f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Entrance_Hall", ref spawnedCount);
+            SpawnSingleConcreteProp("hei_prop_station_gate", new Vector3(bx + 7.5f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Turnstiles", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_turnstyle_01", new Vector3(bx + 10.5f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Turnstiles", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_turnstyle_bars", new Vector3(bx + 13.0f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Turnstiles", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_turnstyle_01", new Vector3(bx + 15.5f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Turnstiles", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_barier_conc_05a", new Vector3(bx + 18.5f, by - 18.0f, bz), new Vector3(0f, 0f, 0f), "Entrance_Hall", ref spawnedCount);
+
+            // --- ZONE 4: SIMULATED OUTSIDE STREET MARKET & TRANSIT ROAD (y = by - 21 .. by - 36) ---
+            SpawnSingleConcreteProp("prop_gazebo_01", new Vector3(bx + 3.0f, by - 23.0f, bz), new Vector3(0f, 0f, 90f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_ven_market_table1", new Vector3(bx + 3.0f, by - 23.0f, bz), new Vector3(0f, 0f, 90f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_crate_01a", new Vector3(bx + 1.5f, by - 24.5f, bz), new Vector3(0f, 0f, 15f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gazebo_02", new Vector3(bx + 3.0f, by - 28.0f, bz), new Vector3(0f, 0f, 90f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_table_03", new Vector3(bx + 3.0f, by - 28.0f, bz), new Vector3(0f, 0f, 90f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_boxpile_02b", new Vector3(bx + 1.5f, by - 29.5f, bz), new Vector3(0f, 0f, 0f), "Market", ref spawnedCount);
+
+            SpawnSingleConcreteProp("prop_gazebo_02", new Vector3(bx + 19.0f, by - 23.0f, bz), new Vector3(0f, 0f, 270f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_ven_market_table1", new Vector3(bx + 19.0f, by - 23.0f, bz), new Vector3(0f, 0f, 270f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_gazebo_01", new Vector3(bx + 19.0f, by - 28.0f, bz), new Vector3(0f, 0f, 270f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_table_03", new Vector3(bx + 19.0f, by - 28.0f, bz), new Vector3(0f, 0f, 270f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_crate_01a", new Vector3(bx + 20.5f, by - 26.0f, bz), new Vector3(0f, 0f, 45f), "Market", ref spawnedCount);
+
+            SpawnSingleConcreteProp("prop_parasol_01", new Vector3(bx + 11.0f, by - 25.5f, bz), new Vector3(0f, 0f, 0f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx + 9.0f, by - 25.5f, bz), new Vector3(0f, 0f, 90f), "Market", ref spawnedCount);
+            SpawnSingleConcreteProp("gr_prop_gr_bench_01a", new Vector3(bx + 13.0f, by - 25.5f, bz), new Vector3(0f, 0f, 270f), "Market", ref spawnedCount);
+
+            SpawnSingleConcreteProp("prop_busstop_02", new Vector3(bx + 5.0f, by - 33.5f, bz), new Vector3(0f, 0f, 0f), "Road_Plaza", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_busstop_04", new Vector3(bx + 17.0f, by - 33.5f, bz), new Vector3(0f, 0f, 0f), "Road_Plaza", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_streetlight_01", new Vector3(bx + 0.0f, by - 33.5f, bz), new Vector3(0f, 0f, 0f), "Road_Plaza", ref spawnedCount);
+            SpawnSingleConcreteProp("prop_streetlight_01", new Vector3(bx + 22.0f, by - 33.5f, bz), new Vector3(0f, 0f, 0f), "Road_Plaza", ref spawnedCount);
+            for (int r = -2; r <= 6; r++)
+            {
+                SpawnSingleConcreteProp("prop_mp_barrier_02b", new Vector3(bx + r * 4.0f, by - 36.5f, bz), new Vector3(0f, 0f, 0f), "Road_Plaza", ref spawnedCount);
+            }
+
+            Log(string.Format("INFO: Built Full-Size Single-Piece LSIA Station & Market Complex with {0} props at ({1:F1}, {2:F1}, {3:F1})", spawnedCount, bx, by, bz));
+            return spawnedCount;
+        }
+
+        #endregion
+
+        
+        #region Precision Surface Detection (Props, Props-on-Props & Terrain)
+
+        /// <summary>
+        /// Bulletproof surface height detector using physics raycasts with IntersectFlags.Map | IntersectFlags.Objects.
+        /// Accurately detects static map terrain, custom modular props, and props stacked on top of props.
+        /// </summary>
+        private bool TryGetPreciseSurfaceZ(float x, float y, float? hintZ, out float surfaceZ)
+        {
+            surfaceZ = 0f;
+            Entity ignoreEnt = (_previewPropHandle != 0) ? Entity.FromHandle(_previewPropHandle) : null;
+
+            // Strategy 1: Targeted vertical Raycast from above expected surface downwards
+            float topZ = hintZ.HasValue ? Math.Max(hintZ.Value + 15.0f, 150.0f) : 350.0f;
+            float bottomZ = -60.0f;
+
+            RaycastResult ray = World.Raycast(
+                new Vector3(x, y, topZ),
+                new Vector3(x, y, bottomZ),
+                IntersectFlags.Map | IntersectFlags.Objects,
+                ignoreEnt
+            );
+
+            if (ray.DidHit && ray.HitPosition.Z > -50.0f)
+            {
+                surfaceZ = ray.HitPosition.Z;
+                return true;
+            }
+
+            // Strategy 2: High-altitude sky Raycast (for high bridges, roofs, or steep hills)
+            RaycastResult highRay = World.Raycast(
+                new Vector3(x, y, 950.0f),
+                new Vector3(x, y, -60.0f),
+                IntersectFlags.Map | IntersectFlags.Objects,
+                ignoreEnt
+            );
+
+            if (highRay.DidHit && highRay.HitPosition.Z > -50.0f)
+            {
+                surfaceZ = highRay.HitPosition.Z;
+                return true;
+            }
+
+            // Strategy 3: Multi-altitude native ground height probe
+            float[] probeAltitudes = new float[] { 800f, 300f, 100f, 50f, 20f };
+            foreach (float alt in probeAltitudes)
+            {
+                float nativeGz = 0f;
+                if (World.GetGroundHeight(new Vector3(x, y, alt), out nativeGz) && nativeGz > -50.0f)
+                {
+                    surfaceZ = nativeGz;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        #endregion
 
         private void ProcessPingCommand(CommandItem cmd)
         {
@@ -974,6 +3838,24 @@ namespace CrowdSim
                 if (!string.IsNullOrEmpty(col)) groupColor = col;
             }
 
+            bool despawnChkEnabled = false;
+            if (payload.ContainsKey("despawn_checkpoint_enabled"))
+                bool.TryParse(Convert.ToString(payload["despawn_checkpoint_enabled"]), out despawnChkEnabled);
+            Vector3? despawnCheckpoint = null;
+            if (payload.ContainsKey("despawn_checkpoint") && payload["despawn_checkpoint"] is Dictionary<string, object>)
+                despawnCheckpoint = ParseVector3Dict((Dictionary<string, object>)payload["despawn_checkpoint"]);
+            float despawnRadius = 8.0f;
+            if (payload.ContainsKey("despawn_radius"))
+            {
+                float dr;
+                if (float.TryParse(Convert.ToString(payload["despawn_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dr))
+                    despawnRadius = Math.Max(2.0f, Math.Min(100.0f, dr));
+            }
+
+            bool contStream = true;
+            if (payload.ContainsKey("continuous_stream"))
+                bool.TryParse(Convert.ToString(payload["continuous_stream"]), out contStream);
+
             // If destination is specified, behavior defaults to ROUTE_TRAVEL
             if (explicitDestination.HasValue && behavior == "INDEPENDENT_WANDER")
             {
@@ -1102,6 +3984,10 @@ namespace CrowdSim
                     grp.VehicleCleanup = grpVehClean;
                     grp.VehicleCleanupRadius = grpVehRad;
                     grp.VehicleCleanupCenter = grpVehCenter;
+                    grp.DespawnCheckpointEnabled = despawnChkEnabled;
+                    grp.DespawnCheckpoint = despawnCheckpoint;
+                    grp.DespawnRadius = despawnRadius;
+                    grp.ContinuousStream = contStream;
 
                     if (RouteSignature(grp) != sigBefore) grp.RouteVersion++;
 
@@ -1157,7 +4043,12 @@ namespace CrowdSim
                         Color = groupColor,
                         VehicleCleanup = grpVehClean,
                         VehicleCleanupRadius = grpVehRad,
-                        VehicleCleanupCenter = grpVehCenter
+                        VehicleCleanupCenter = grpVehCenter,
+                        DespawnCheckpointEnabled = despawnChkEnabled,
+                        DespawnCheckpoint = despawnCheckpoint,
+                        DespawnRadius = despawnRadius,
+                        ContinuousStream = contStream,
+                        ExitedCount = 0
                     };
                     _groups[groupId] = grp;
                 }
@@ -1918,6 +4809,32 @@ namespace CrowdSim
                     if (!string.IsNullOrEmpty(ab)) grp.ArrivalBehavior = ab;
                 }
 
+                                if (payload.ContainsKey("despawn_checkpoint_enabled"))
+                {
+                    bool dce;
+                    if (bool.TryParse(Convert.ToString(payload["despawn_checkpoint_enabled"]), out dce))
+                        grp.DespawnCheckpointEnabled = dce;
+                }
+
+                if (payload.ContainsKey("despawn_checkpoint") && payload["despawn_checkpoint"] is Dictionary<string, object>)
+                {
+                    grp.DespawnCheckpoint = ParseVector3Dict((Dictionary<string, object>)payload["despawn_checkpoint"]);
+                }
+
+                if (payload.ContainsKey("despawn_radius"))
+                {
+                    float dcr;
+                    if (float.TryParse(Convert.ToString(payload["despawn_radius"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out dcr))
+                        grp.DespawnRadius = Math.Max(2.0f, Math.Min(100.0f, dcr));
+                }
+
+                if (payload.ContainsKey("continuous_stream"))
+                {
+                    bool cs;
+                    if (bool.TryParse(Convert.ToString(payload["continuous_stream"]), out cs))
+                        grp.ContinuousStream = cs;
+                }
+
                 if (payload.ContainsKey("density_aware"))
                 {
                     bool da;
@@ -2087,6 +5004,11 @@ namespace CrowdSim
             playerDict["y"] = Math.Round(playerPos.Y, 2);
             playerDict["z"] = Math.Round(playerPos.Z, 2);
             playerDict["heading"] = Math.Round(heading, 1);
+            playerDict["god_mode"] = _godModeEnabled;
+            playerDict["never_wanted"] = _neverWantedEnabled;
+            playerDict["noclip"] = _noclipEnabled;
+            playerDict["prop_builder"] = _propBuilderEnabled;
+            playerDict["wanted_level"] = player != null ? player.WantedLevel : 0;
 
             List<Dictionary<string, object>> groupList = new List<Dictionary<string, object>>();
             List<Dictionary<string, object>> pedList = new List<Dictionary<string, object>>();
@@ -2148,6 +5070,7 @@ namespace CrowdSim
             ackData["groups"] = groupList;
             ackData["heatmap"] = heatmapDict;
             ackData["pedestrians"] = pedList;
+            ackData["props"] = GetSerializedCustomPropsList();
             ackData["total_managed_peds"] = _crowdRegistry.Count;
             ackData["game_time"] = Game.GameTime;
             ackData["timestamp_utc"] = DateTime.UtcNow.ToString("o");
@@ -2189,12 +5112,18 @@ namespace CrowdSim
                     continue;
                 }
 
-                // Global population cap check
+                // Global population & engine concurrent safety check:
+                // Allows scaling up to MaxTotalPopulation when running with an expanded engine ped pool.
+                // Global population & engine concurrent safety check:
+                // Keeping concurrent living peds at 240 ensures total engine entities (240 + player) = 241 <= 255,
+                // completely preventing the 256 stack-buffer overflow in GTA5.exe.
+                // In Continuous Stream mode, peds exit at destination and immediately recycle at origin,
+                // allowing thousands of peds to flow through the scene with 100% stability.
                 int currentTotal;
                 lock (_lock) { currentTotal = _crowdRegistry.Count; }
-                if (currentTotal >= MaxTotalPopulation)
+                if (currentTotal >= 240)
                 {
-                    Log(string.Format("WARN: Global population cap ({0}) reached. Halting spawn for group {1}.", MaxTotalPopulation, grp.GroupId));
+                    grp.LastSpawnTime = DateTime.UtcNow.AddSeconds(0.5);
                     break;
                 }
 
@@ -2266,28 +5195,17 @@ namespace CrowdSim
                     candidatePos = new Vector3(grp.SpawnCenter.X + (float)Math.Cos(angle) * r, grp.SpawnCenter.Y + (float)Math.Sin(angle) * r, grp.SpawnCenter.Z);
                 }
 
-                // Resolve ground-level Z coordinate
-                float groundZ = 0f;
-                if (World.GetGroundHeight(new Vector3(candidatePos.X, candidatePos.Y, 1000.0f), out groundZ))
+                // Resolve exact surface Z using precision Raycast (Map + Objects)
+                // Accurately detects ground, platforms, and props stacked on props!
+                float surfaceZ;
+                float? hintZ = grp.Origin.HasValue ? (float?)grp.Origin.Value.Z : null;
+                if (TryGetPreciseSurfaceZ(candidatePos.X, candidatePos.Y, hintZ, out surfaceZ))
                 {
-                    candidatePos.Z = groundZ;
+                    candidatePos.Z = surfaceZ + 0.05f;
                 }
-                else if (World.GetGroundHeight(new Vector3(candidatePos.X, candidatePos.Y, 100.0f), out groundZ))
+                else if (grp.Origin.HasValue)
                 {
-                    candidatePos.Z = groundZ;
-                }
-                else if (Math.Abs(candidatePos.Z) < 0.5f && Game.Player != null && Game.Player.Character != null && Game.Player.Character.Exists())
-                {
-                    candidatePos.Z = Game.Player.Character.Position.Z;
-                }
-
-                Vector3 safePos;
-                if (World.GetSafePositionForPed(candidatePos, out safePos))
-                {
-                    if ((safePos - candidatePos).Length() < 20.0f)
-                    {
-                        candidatePos = safePos;
-                    }
+                    candidatePos.Z = grp.Origin.Value.Z + 0.05f;
                 }
 
                 // Optional Density-Aware check
@@ -2368,12 +5286,13 @@ namespace CrowdSim
                 }
                 else
                 {
-                    // If the native engine pool is saturated, throttle gracefully without burning pending queue
-                    if (string.IsNullOrEmpty(spawnFailureReason) && grp.MemberHandles.Count >= 180)
+                    // If the native engine pool is saturated (null returned), throttle gracefully without burning pending queue or spamming memory
+                    if (string.IsNullOrEmpty(spawnFailureReason))
                     {
-                        grp.LastSpawnTime = DateTime.UtcNow.AddSeconds(2.0);
+                        grp.LastSpawnTime = DateTime.UtcNow.AddSeconds(3.0);
                         grp.Status = "ACTIVE";
-                        Log(string.Format("INFO: [MAX_CAPACITY] Native engine ped pool saturated at {0} active peds. Spawning throttled; holding {1} pending peds for available slots.", grp.MemberHandles.Count, grp.PendingCount));
+                        Log(string.Format("INFO: [MAX_CAPACITY] Native engine ped pool saturated at {0} active peds. Spawning throttled for 3s to protect engine memory; holding {1} pending peds for open slots.", grp.MemberHandles.Count, grp.PendingCount));
+                        break; // Stop trying to spawn in this frame
                     }
                     else
                     {
@@ -2382,7 +5301,7 @@ namespace CrowdSim
                         Log(string.Format("ERROR: [SPAWN_FAIL] Ped creation failed for group {0} ('{1}') model '{2}' at ({3},{4},{5}). Reason: {6}. Failed: {7}, Pending: {8}",
                             grp.GroupId, grp.Name, chosenModel,
                             Math.Round(candidatePos.X, 1), Math.Round(candidatePos.Y, 1), Math.Round(candidatePos.Z, 1),
-                            string.IsNullOrEmpty(spawnFailureReason) ? "Entity null or Exists() returned false" : spawnFailureReason,
+                            spawnFailureReason,
                             grp.FailedCount, grp.PendingCount));
                     }
                 }
@@ -2417,12 +5336,61 @@ namespace CrowdSim
         // (otherwise nav targets sit ~30m underground and peds never arrive).
         private Vector3 ResolveNavTarget(Vector3 target, Vector3 refPos)
         {
-            float gz;
-            if (World.GetGroundHeight(new Vector3(target.X, target.Y, refPos.Z + 30.0f), out gz) && Math.Abs(gz - refPos.Z) < 60.0f)
+            float surfaceZ;
+            float? hintZ = (Math.Abs(target.Z) > 1.0f) ? (float?)target.Z : (float?)Math.Max(refPos.Z, 18.5f);
+            if (TryGetPreciseSurfaceZ(target.X, target.Y, hintZ, out surfaceZ))
             {
-                return new Vector3(target.X, target.Y, gz);
+                return new Vector3(target.X, target.Y, surfaceZ);
             }
-            return new Vector3(target.X, target.Y, refPos.Z);
+            return target;
+        }
+
+        /// <summary>
+        /// Hybrid 3D Navigation Controller:
+        /// Uses direct 3D steering (TASK_GO_STRAIGHT_TO_COORD) when traversing custom station props,
+        /// stairs, elevated Foot Over Bridges (FOB), or turnstile corridors (where baked .ynv NavMesh is absent),
+        /// and falls back to FollowNavMeshTo on open ground segments.
+        /// </summary>
+        private void TaskPedMoveToTarget(Ped p, Vector3 pedPos, Vector3 rawTarget, float moveSpeed, float arriveRadius, bool isStuckOrClimbing = false)
+        {
+            Vector3 resolved = ResolveNavTarget(rawTarget, pedPos);
+            float dz = Math.Abs(resolved.Z - pedPos.Z);
+            float dist2d = Dist2D(pedPos, resolved);
+            bool hasCustomStation = _customProps.Count > 0;
+            bool isElevatedOrStairs = (dz > 0.35f) || (pedPos.Z > 14.8f) || (resolved.Z > 14.8f);
+
+            // Stair & Overbridge Slope Assist: if a ped is snagged against a custom stair lip or bridge edge,
+            // smoothly advance and snap its Z height onto the stair/bridge surface so crowds never bottleneck.
+            if (isStuckOrClimbing && (isElevatedOrStairs || hasCustomStation) && dist2d > 0.6f)
+            {
+                float nudgeDist = Math.Min(1.35f, dist2d * 0.45f);
+                float nx = pedPos.X + ((resolved.X - pedPos.X) / dist2d) * nudgeDist;
+                float ny = pedPos.Y + ((resolved.Y - pedPos.Y) / dist2d) * nudgeDist;
+                float nz = pedPos.Z + (resolved.Z - pedPos.Z) * Math.Min(1.0f, nudgeDist / Math.Max(1.0f, dist2d));
+                float surfZ;
+                if (TryGetPreciseSurfaceZ(nx, ny, Math.Max(pedPos.Z, resolved.Z) + 2.5f, out surfZ))
+                {
+                    nz = surfZ + 0.08f;
+                }
+                Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, p.Handle, nx, ny, nz, false, false, false);
+                pedPos = new Vector3(nx, ny, nz);
+            }
+
+            if (isElevatedOrStairs || (hasCustomStation && dist2d < 45.0f))
+            {
+                float dx = resolved.X - pedPos.X;
+                float dy = resolved.Y - pedPos.Y;
+                float heading = (float)(Math.Atan2(-dx, dy) * 180.0 / Math.PI);
+                if (heading < 0f) heading += 360f;
+
+                Function.Call(Hash.TASK_GO_STRAIGHT_TO_COORD, p.Handle, resolved.X, resolved.Y, resolved.Z, moveSpeed, -1, heading, Math.Max(0.4f, arriveRadius));
+                Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, moveSpeed);
+            }
+            else
+            {
+                p.Task.FollowNavMeshTo(resolved, (PedMoveBlendRatio)moveSpeed, radius: Math.Max(0.8f, arriveRadius));
+                Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, moveSpeed);
+            }
         }
 
         private Vector3 ComputeDispersedPoint(Vector3 center, float radius)
@@ -2459,6 +5427,8 @@ namespace CrowdSim
                 for (int i = 0; i < grp.RouteWaypoints.Count; i++)
                     sb.AppendFormat(CultureInfo.InvariantCulture, "W{0:F1},{1:F1};", grp.RouteWaypoints[i].X, grp.RouteWaypoints[i].Y);
             }
+            if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                sb.AppendFormat(CultureInfo.InvariantCulture, "DSP{0:F1},{1:F1},{2:F1};", grp.DespawnCheckpoint.Value.X, grp.DespawnCheckpoint.Value.Y, grp.DespawnRadius);
             return sb.ToString();
         }
 
@@ -2502,9 +5472,7 @@ namespace CrowdSim
                 if (HasRoute(grp))
                 {
                     Vector3 target = (grp.RouteWaypoints != null && grp.RouteWaypoints.Count > 0) ? grp.RouteWaypoints[0] : rec.DispersedDestination;
-                    target = ResolveNavTarget(target, spawnPos);
-                    ped.Task.FollowNavMeshTo(target, (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
-                    Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, ped.Handle, grp.MoveSpeed);
+                    TaskPedMoveToTarget(ped, spawnPos, target, grp.MoveSpeed, 1.0f, false);
                     return;
                 }
 
@@ -2688,9 +5656,64 @@ namespace CrowdSim
                     rec.LastTaskAssignTime = DateTime.MinValue;
                 }
 
+                // If heading to final separate despawn checkpoint
+                if (rec.HeadingToDespawn)
+                {
+                    if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                    {
+                        Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                        float dspRad = Math.Max(3.0f, grp.DespawnRadius);
+                        if (Dist2D(pedPos, dspTarget) <= dspRad)
+                        {
+                            p.IsPersistent = false;
+                            p.Delete();
+                            lock (_lock)
+                            {
+                                _crowdRegistry.Remove(rec);
+                                grp.MemberHandles.Remove(p.Handle);
+                                grp.ExitedCount++;
+                                if (grp.ContinuousStream && grp.Status != "PAUSED" && grp.Status != "STOPPED")
+                                {
+                                    int alive = grp.MemberHandles.Count;
+                                    if (alive < grp.TargetCount)
+                                    {
+                                        grp.PendingCount = grp.TargetCount - alive;
+                                        grp.Status = "SPAWNING";
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Only retask if unassigned or stuck
+                        bool stuckDsp = (p.Velocity.Length() < 0.25f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 2.2);
+                        if (rec.LastTaskAssignTime == DateTime.MinValue || stuckDsp)
+                        {
+                            rec.LastTaskAssignTime = DateTime.UtcNow;
+                            TaskPedMoveToTarget(p, pedPos, dspTarget, grp.MoveSpeed, 1.0f, stuckDsp);
+                        }
+                        continue;
+                    }
+                    else
+                    {
+                        rec.HeadingToDespawn = false;
+                        if (isLooping) rec.IsReverseRoute = true;
+                        else rec.HasReachedDestination = true;
+                    }
+                }
+
                 // If ped has reached its permanent destination (STOP, WANDER, GATHER)
                 if (rec.HasReachedDestination)
                 {
+                    if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                    {
+                        rec.HasReachedDestination = false;
+                        rec.HeadingToDespawn = true;
+                        rec.LastTaskAssignTime = DateTime.UtcNow;
+                        Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                        TaskPedMoveToTarget(p, pedPos, dspTarget, grp.MoveSpeed, 1.0f, false);
+                        continue;
+                    }
                     if ((DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 10.0)
                     {
                         rec.LastTaskAssignTime = DateTime.UtcNow;
@@ -2715,11 +5738,11 @@ namespace CrowdSim
                 // -------------------------------------------------------------
                 if (!rec.IsReverseRoute)
                 {
-                    // Advance through intermediate waypoints
+                    // Advance through intermediate waypoints (tighter 2.6m radius for accurate stair/bridge alignment)
                     if (hasWps && rec.CurrentWaypointIndex < grp.RouteWaypoints.Count)
                     {
                         Vector3 wp = grp.RouteWaypoints[rec.CurrentWaypointIndex];
-                        if (Dist2D(pedPos, wp) <= 3.5f)
+                        if (Dist2D(pedPos, wp) <= 2.6f)
                         {
                             rec.CurrentWaypointIndex++;
                             rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately to next waypoint
@@ -2738,9 +5761,18 @@ namespace CrowdSim
                         currentTarget = hasDest ? rec.DispersedDestination : dest;
 
                         // Check if ped reached final destination
-                        if (Dist2D(pedPos, dest) <= arriveRadius || (hasDest && Dist2D(pedPos, rec.DispersedDestination) <= 3.5f))
+                        if (Dist2D(pedPos, dest) <= arriveRadius || (hasDest && Dist2D(pedPos, rec.DispersedDestination) <= 3.2f))
                         {
-                            if (grp.ArrivalBehavior == "DESPAWN" || grp.ArrivalBehavior == "DESPAWN_AT_DEST")
+                            if (grp.DespawnCheckpointEnabled && grp.DespawnCheckpoint.HasValue)
+                            {
+                                rec.HeadingToDespawn = true;
+                                rec.HasReachedDestination = false; // Do not trigger terminal STOP
+                                rec.LastTaskAssignTime = DateTime.UtcNow;
+                                Vector3 dspTarget = grp.DespawnCheckpoint.Value;
+                                TaskPedMoveToTarget(p, pedPos, dspTarget, grp.MoveSpeed, 1.5f, false);
+                                continue;
+                            }
+                            else if (grp.ArrivalBehavior == "DESPAWN" || grp.ArrivalBehavior == "DESPAWN_AT_DEST")
                             {
                                 p.IsPersistent = false;
                                 p.Delete();
@@ -2748,6 +5780,16 @@ namespace CrowdSim
                                 {
                                     _crowdRegistry.Remove(rec);
                                     grp.MemberHandles.Remove(p.Handle);
+                                    grp.ExitedCount++;
+                                    if (grp.ContinuousStream && grp.Status != "PAUSED" && grp.Status != "STOPPED")
+                                    {
+                                        int alive = grp.MemberHandles.Count;
+                                        if (alive < grp.TargetCount)
+                                        {
+                                            grp.PendingCount = grp.TargetCount - alive;
+                                            grp.Status = "SPAWNING";
+                                        }
+                                    }
                                 }
                                 continue;
                             }
@@ -2778,12 +5820,13 @@ namespace CrowdSim
                         }
                     }
 
-                    // Task ped to continue towards currentTarget
-                    if ((DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 3.0 || rec.LastTaskAssignTime == DateTime.MinValue)
+                    // Task ped to continue towards currentTarget when unassigned, waypoint changed, or stuck/climbing
+                    bool isStuckFwd = (p.Velocity.Length() < 0.25f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 2.2);
+                    bool needsRetask = (rec.LastTaskAssignTime == DateTime.MinValue) || isStuckFwd;
+                    if (needsRetask)
                     {
                         rec.LastTaskAssignTime = DateTime.UtcNow;
-                        p.Task.FollowNavMeshTo(ResolveNavTarget(currentTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
-                        Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                        TaskPedMoveToTarget(p, pedPos, currentTarget, grp.MoveSpeed, 1.0f, isStuckFwd);
                     }
                 }
                 // -------------------------------------------------------------
@@ -2795,7 +5838,7 @@ namespace CrowdSim
                     if (hasWps && rec.CurrentWaypointIndex >= 0)
                     {
                         Vector3 wp = grp.RouteWaypoints[rec.CurrentWaypointIndex];
-                        if (Dist2D(pedPos, wp) <= 3.5f)
+                        if (Dist2D(pedPos, wp) <= 2.6f)
                         {
                             rec.CurrentWaypointIndex--;
                             rec.LastTaskAssignTime = DateTime.MinValue; // Retask immediately
@@ -2816,7 +5859,7 @@ namespace CrowdSim
                         currentTarget = rec.DispersedOrigin;
 
                         // Check if ped reached Origin
-                        if (Dist2D(pedPos, originPos) <= originRad || Dist2D(pedPos, rec.DispersedOrigin) <= 3.5f)
+                        if (Dist2D(pedPos, originPos) <= originRad || Dist2D(pedPos, rec.DispersedOrigin) <= 3.2f)
                         {
                             // Reached Origin! Turn around and head forward towards Destination again!
                             rec.IsReverseRoute = false;
@@ -2828,12 +5871,13 @@ namespace CrowdSim
                         }
                     }
 
-                    // Task ped to continue towards currentTarget
-                    if ((DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 3.0 || rec.LastTaskAssignTime == DateTime.MinValue)
+                    // Task ped to continue towards currentTarget when unassigned, waypoint changed, or stuck/climbing
+                    bool isStuckRev = (p.Velocity.Length() < 0.25f && (DateTime.UtcNow - rec.LastTaskAssignTime).TotalSeconds >= 2.2);
+                    bool needsRetask = (rec.LastTaskAssignTime == DateTime.MinValue) || isStuckRev;
+                    if (needsRetask)
                     {
                         rec.LastTaskAssignTime = DateTime.UtcNow;
-                        p.Task.FollowNavMeshTo(ResolveNavTarget(currentTarget, pedPos), (PedMoveBlendRatio)grp.MoveSpeed, radius: 1.0f);
-                        Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, p.Handle, grp.MoveSpeed);
+                        TaskPedMoveToTarget(p, pedPos, currentTarget, grp.MoveSpeed, 1.0f, isStuckRev);
                     }
                 }
             }
@@ -3109,6 +6153,15 @@ namespace CrowdSim
             }
             d["waypoints"] = wpList;
 
+            d["despawn_checkpoint_enabled"] = grp.DespawnCheckpointEnabled;
+            if (grp.DespawnCheckpoint.HasValue)
+            {
+                d["despawn_checkpoint"] = SerializeVector3(grp.DespawnCheckpoint.Value);
+                d["despawn_radius"] = Math.Round(grp.DespawnRadius, 2);
+            }
+            d["continuous_stream"] = grp.ContinuousStream;
+            d["exited_count"] = grp.ExitedCount;
+
             return d;
         }
 
@@ -3224,7 +6277,7 @@ namespace CrowdSim
                         {
                             pollUrlWithParams = string.Format(
                                 CultureInfo.InvariantCulture,
-                                "{0}?px={1:F2}&py={2:F2}&pz={3:F2}&h={4:F1}&handle={5}&groups={6}&peds={7}",
+                                "{0}?px={1:F2}&py={2:F2}&pz={3:F2}&h={4:F1}&handle={5}&groups={6}&peds={7}&god={8}&wanted={9}&fly={10}",
                                 PollUrl,
                                 _cachedPlayerPos.X,
                                 _cachedPlayerPos.Y,
@@ -3232,7 +6285,10 @@ namespace CrowdSim
                                 _cachedPlayerHeading,
                                 _cachedPlayerHandle,
                                 _groups.Count,
-                                _crowdRegistry.Count
+                                _crowdRegistry.Count,
+                                _godModeEnabled ? 1 : 0,
+                                _neverWantedEnabled ? 1 : 0,
+                                _noclipEnabled ? 1 : 0
                             );
                         }
                     }
@@ -3450,6 +6506,11 @@ namespace CrowdSim
             public string ArrivalBehavior { get; set; }
             public string Color { get; set; }
             public bool VehicleCleanup { get; set; }
+            public bool DespawnCheckpointEnabled { get; set; }
+            public Vector3? DespawnCheckpoint { get; set; }
+            public float DespawnRadius { get; set; }
+            public bool ContinuousStream { get; set; }
+            public int ExitedCount { get; set; }
             public float VehicleCleanupRadius { get; set; }
             public string VehicleCleanupCenter { get; set; }
 
@@ -3488,6 +6549,11 @@ namespace CrowdSim
                 MoveSpeed = 1.4f;
                 ArrivalBehavior = "WANDER";
                 Color = "#38bdf8";
+                DespawnCheckpointEnabled = false;
+                DespawnCheckpoint = null;
+                DespawnRadius = 8.0f;
+                ContinuousStream = true;
+                ExitedCount = 0;
             }
         }
 
@@ -3502,6 +6568,7 @@ namespace CrowdSim
             public int CurrentWaypointIndex { get; set; }
             public bool IsReverseRoute { get; set; }
             public bool HasReachedDestination { get; set; }
+            public bool HeadingToDespawn { get; set; }
             public Vector3 DispersedDestination { get; set; }
             public Vector3 DispersedOrigin { get; set; }
             public DateTime LastTaskAssignTime { get; set; }
@@ -3516,5 +6583,46 @@ namespace CrowdSim
         }
 
         #endregion
-    }
+    
+        #region Ambient Suppression & Entity Purging
+        private DateTime _lastAmbientSweep = DateTime.MinValue;
+
+        private void SweepAmbientEntities()
+        {
+            try
+            {
+                SyncWorldPropsWithManager();
+                Ped playerPed = Game.Player.Character;
+                HashSet<int> crowdHandles = new HashSet<int>();
+                lock (_lock)
+                {
+                    foreach (CrowdPedRecord r in _crowdRegistry)
+                    {
+                        crowdHandles.Add(r.Handle);
+                    }
+                }
+
+                foreach (Ped p in World.GetAllPeds())
+                {
+                    if (p != null && p.Exists() && (playerPed == null || p.Handle != playerPed.Handle) && !crowdHandles.Contains(p.Handle))
+                    {
+                        p.IsPersistent = false;
+                        p.Delete();
+                    }
+                }
+
+                foreach (Vehicle v in World.GetAllVehicles())
+                {
+                    if (v != null && v.Exists() && (playerPed == null || !playerPed.IsInVehicle(v)))
+                    {
+                        v.IsPersistent = false;
+                        v.Delete();
+                    }
+                }
+            }
+            catch { }
+        }
+        #endregion
+
+}
 }
